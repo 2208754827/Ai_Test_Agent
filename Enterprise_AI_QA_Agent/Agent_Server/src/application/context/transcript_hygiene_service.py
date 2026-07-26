@@ -10,9 +10,19 @@ class TranscriptHygieneService:
         self,
         messages: list[ChatMessage],
         limit: int = 24,
+        summary: str | None = None,
+        summary_covers_until: int = 0,
     ) -> list[dict[str, Any]]:
         runtime_messages: list[dict[str, Any]] = []
-        for item in messages[-limit:]:
+        if summary and summary.strip():
+            runtime_messages.append(
+                {
+                    "role": "system",
+                    "content": "[Earlier conversation summary]\n" + summary.strip(),
+                }
+            )
+        tail = messages[summary_covers_until:] if summary_covers_until > 0 else messages
+        for item in tail[-limit:]:
             if not self.is_context_eligible(item):
                 continue
             role = item.role.value

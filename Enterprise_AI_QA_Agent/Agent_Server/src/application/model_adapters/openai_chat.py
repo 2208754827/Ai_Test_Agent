@@ -38,7 +38,7 @@ class OpenAIChatCompletionsAdapter(ProviderAdapter):
         payload: dict[str, Any] = {
             "model": config.model_id,
             "messages": self._build_messages(request.system_prompt, request, tool_name_map),
-            "max_tokens": config.max_tokens,
+            "max_tokens": config.max_output_tokens,
         }
         if config.temperature is not None:
             payload["temperature"] = config.temperature

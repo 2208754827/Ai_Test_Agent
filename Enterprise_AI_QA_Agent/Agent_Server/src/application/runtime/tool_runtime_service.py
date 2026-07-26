@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import json
@@ -3240,7 +3240,7 @@ class ToolRuntimeService:
 
         reviewer_count = _clamp_int(arguments.get("reviewer_count"), minimum=2, maximum=5, default=3)
         model_config = self._resolve_code_review_model_config(arguments, context)
-        context_window_tokens = int(model_config.max_tokens) if model_config is not None else 8192
+        context_window_tokens = int(model_config.context_window) if model_config is not None else 8192
         supports_reasoning = bool(model_config.supports_reasoning) if model_config is not None else False
 
         if context_window_tokens <= 8192:

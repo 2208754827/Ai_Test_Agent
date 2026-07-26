@@ -8,6 +8,7 @@ from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from src.application.models.model_runtime_service import ModelRuntimeService
+from src.application.context.context_compaction_service import ContextCompactionService
 from src.application.context.transcript_hygiene_service import TranscriptHygieneService
 from src.application.resources.session_resource_service import SessionResourceService
 from src.application.runtime.tool_runtime_service import ToolExecutionContext, ToolRuntimeService
@@ -43,6 +44,8 @@ class RuntimeService:
         transcript_hygiene_service: TranscriptHygieneService | None = None,
         max_iterations: int = 8,
         session_resource_service: SessionResourceService | None = None,
+        context_compaction_service: ContextCompactionService | None = None,
+        context_max_tail_messages: int = 24,
     ) -> None:
         self._graph = graph
         self._model_runtime_service = model_runtime_service
@@ -52,6 +55,8 @@ class RuntimeService:
         self._transcript_hygiene_service = transcript_hygiene_service or TranscriptHygieneService()
         self._max_iterations = max_iterations
         self._session_resource_service = session_resource_service
+        self._context_compaction_service = context_compaction_service
+        self._context_max_tail_messages = context_max_tail_messages
 
     def request_interrupt(self, session_id: str, reason: str = "") -> None:
         self._runtime_control.request_interrupt(session_id, reason)
@@ -70,9 +75,22 @@ class RuntimeService:
         event_queue: asyncio.Queue | None = None,
     ) -> RuntimeTurnResult:
         self.clear_interrupt(session.id)
+        compaction_info = None
+        if self._context_compaction_service is not None:
+            compaction_info = await self._context_compaction_service.maybe_compact(session)
         initial_state = self._build_initial_state(session, request)
         initial_state["_event_queue"] = event_queue
         await self._attach_session_resources(initial_state)
+        if compaction_info:
+            append_graph_event(
+                initial_state,
+                "runtime.context_compacted",
+                "runtime",
+                "Older conversation history was compacted into a structured summary.",
+                covers_until_index=compaction_info.get("covers_until_index", 0),
+                compacted_message_count=compaction_info.get("compacted_message_count", 0),
+                summary_length=compaction_info.get("summary_length", 0),
+            )
         append_graph_event(
             initial_state,
             "runtime.turn_started",
@@ -356,6 +374,8 @@ class RuntimeService:
             "model_request_payload": {},
             "model_response_summary": {},
             "model_response_text": "",
+            "turn_token_usage": {},
+            "model_context_window": int(model_config.context_window) if model_config is not None else 128000,
             "assistant_tool_call_message": {},
             "model_tool_calls": [],
             "tool_results": [],
@@ -478,7 +498,14 @@ class RuntimeService:
         return self._model_runtime_service.get_default_model_config()
 
     def _build_conversation_messages(self, session: SessionRecord) -> list[dict[str, Any]]:
-        return self._transcript_hygiene_service.build_runtime_messages(session.messages, limit=24)
+        summary_state = dict(session.metadata.get("context_summary") or {})
+        summary = str(summary_state.get("summary") or "").strip()
+        return self._transcript_hygiene_service.build_runtime_messages(
+            session.messages,
+            limit=self._context_max_tail_messages,
+            summary=summary or None,
+            summary_covers_until=int(summary_state.get("covers_until_index") or 0),
+        )
 
     def _state_from_pending_turn(self, session: SessionRecord, pending_turn: dict[str, Any]) -> dict[str, Any]:
         graph_state = dict(pending_turn.get("graph_state", {}))
@@ -553,6 +580,8 @@ class RuntimeService:
             "model_request_payload": dict(graph_state.get("model_request_payload") or {}),
             "model_response_summary": dict(graph_state.get("model_response_summary") or {}),
             "model_response_text": str(graph_state.get("model_response_text") or ""),
+            "turn_token_usage": dict(graph_state.get("turn_token_usage") or fallback_pending_turn.get("turn_token_usage") or {}),
+            "model_context_window": int(graph_state.get("model_context_window") or fallback_pending_turn.get("model_context_window") or 128000),
             "assistant_tool_call_message": dict(graph_state.get("assistant_tool_call_message") or {}),
             "model_tool_calls": list(graph_state.get("model_tool_calls") or []),
             "tool_results": list(graph_state.get("tool_results") or fallback_pending_turn.get("tool_results") or []),

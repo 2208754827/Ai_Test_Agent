@@ -126,6 +126,10 @@ class Settings(BaseSettings):
     browser_action_timeout_seconds: int = 15
     runtime_max_iterations: int = 8
     coordinator_max_workers: int = 4
+    # Context budget management
+    context_compaction_watermark: float = 0.7
+    context_max_tail_messages: int = 24
+    tool_message_max_chars: int = 24000
     cors_origins: list[str] = Field(
         default_factory=lambda: ["http://localhost:5173", "http://127.0.0.1:5173"]
     )

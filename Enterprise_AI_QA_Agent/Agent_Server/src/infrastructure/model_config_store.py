@@ -35,6 +35,8 @@ class MySQLModelConfigStore:
                         `provider` VARCHAR(64) NOT NULL,
                         `transport` VARCHAR(64) NULL,
                         `capability_overrides` JSON NULL,
+                        `context_window` BIGINT NULL,
+                        `max_output_tokens` INT NULL,
                         `is_active` TINYINT(1) NOT NULL DEFAULT 0,
                         `created_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                         `updated_at` DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
@@ -180,6 +182,26 @@ class MySQLModelConfigStore:
                         """
                     )
                 cur.execute(
+                    f"SHOW COLUMNS FROM `{self._settings.llm_model_table}` LIKE 'context_window'"
+                )
+                if not cur.fetchone():
+                    cur.execute(
+                        f"""
+                        ALTER TABLE `{self._settings.llm_model_table}`
+                        ADD COLUMN `context_window` BIGINT NULL AFTER `capability_overrides`
+                        """
+                    )
+                cur.execute(
+                    f"SHOW COLUMNS FROM `{self._settings.llm_model_table}` LIKE 'max_output_tokens'"
+                )
+                if not cur.fetchone():
+                    cur.execute(
+                        f"""
+                        ALTER TABLE `{self._settings.llm_model_table}`
+                        ADD COLUMN `max_output_tokens` INT NULL AFTER `context_window`
+                        """
+                    )
+                cur.execute(
                     f"SELECT COUNT(*) AS total FROM `{self._settings.llm_model_table}`"
                 )
                 total = cur.fetchone()["total"]
@@ -235,6 +257,7 @@ class MySQLModelConfigStore:
         "id, model_name, api_key, base_url, provider, is_active, created_at, updated_at"
         ", capability_overrides, transport, applications"
         ", auth_type, oauth_provider, oauth_refresh_token"
+        ", context_window, max_output_tokens"
     )
 
     def list_all(self) -> list[ModelConfigRecord]:
@@ -302,8 +325,8 @@ class MySQLModelConfigStore:
                     f"""
                     INSERT INTO `{self._settings.llm_model_table}`
                     (`model_name`, `api_key`, `base_url`, `provider`, `transport`, `applications`, `capability_overrides`, `is_active`,
-                     `auth_type`, `oauth_provider`, `oauth_refresh_token`)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     `auth_type`, `oauth_provider`, `oauth_refresh_token`, `context_window`, `max_output_tokens`)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON DUPLICATE KEY UPDATE
                         `api_key`=VALUES(`api_key`),
                         `base_url`=VALUES(`base_url`),
@@ -314,7 +337,9 @@ class MySQLModelConfigStore:
                         `is_active`=VALUES(`is_active`),
                         `auth_type`=VALUES(`auth_type`),
                         `oauth_provider`=VALUES(`oauth_provider`),
-                        `oauth_refresh_token`=VALUES(`oauth_refresh_token`)
+                        `oauth_refresh_token`=VALUES(`oauth_refresh_token`),
+                        `context_window`=VALUES(`context_window`),
+                        `max_output_tokens`=VALUES(`max_output_tokens`)
                     """,
                     (
                         payload.model_name,
@@ -331,6 +356,8 @@ class MySQLModelConfigStore:
                         payload.auth_type or "api_key",
                         payload.oauth_provider or None,
                         payload.oauth_refresh_token if payload.oauth_refresh_token else ((existing_row or {}).get("oauth_refresh_token") or None),
+                        payload.context_window if payload.context_window else ((existing_row or {}).get("context_window") or None),
+                        payload.max_output_tokens if payload.max_output_tokens else ((existing_row or {}).get("max_output_tokens") or None),
                     ),
                 )
                 self._ensure_task_execution_active(cur)
@@ -389,7 +416,9 @@ class MySQLModelConfigStore:
                         `is_active`=%s,
                         `auth_type`=%s,
                         `oauth_provider`=%s,
-                        `oauth_refresh_token`=%s
+                        `oauth_refresh_token`=%s,
+                        `context_window`=%s,
+                        `max_output_tokens`=%s
                     WHERE `model_name`=%s
                     """,
                     (
@@ -407,6 +436,8 @@ class MySQLModelConfigStore:
                         payload.auth_type or "api_key",
                         payload.oauth_provider or None,
                         payload.oauth_refresh_token if payload.oauth_refresh_token else (existing_row.get("oauth_refresh_token") or None),
+                        payload.context_window if payload.context_window else (existing_row.get("context_window") or None),
+                        payload.max_output_tokens if payload.max_output_tokens else (existing_row.get("max_output_tokens") or None),
                         original_model_name,
                     ),
                 )
@@ -563,6 +594,8 @@ class MySQLModelConfigStore:
             is_default=record.is_default,
             temperature=record.temperature,
             max_tokens=record.max_tokens,
+            context_window=record.context_window,
+            max_output_tokens=record.max_output_tokens,
             has_secret=bool(record.api_key),
             capabilities=record.capabilities,
             capability_overrides=record.capability_overrides,
@@ -598,6 +631,8 @@ class MySQLModelConfigStore:
         auth_type = str(row.get("auth_type") or "api_key").strip() or "api_key"
         if auth_type not in ("api_key", "oauth2"):
             auth_type = "api_key"
+        context_window = int(row.get("context_window") or 0) or 128000
+        max_output_tokens = int(row.get("max_output_tokens") or 0) or 8192
         return ModelConfigRecord(
             id=row.get("id"),
             key=canonical_key,
@@ -615,7 +650,9 @@ class MySQLModelConfigStore:
             is_active=bool(row.get("is_active")),
             is_default=False,
             temperature=None,
-            max_tokens=4096,
+            max_tokens=max_output_tokens,
+            context_window=context_window,
+            max_output_tokens=max_output_tokens,
             extra_headers={},
             capabilities=capabilities,
             capability_overrides=capability_overrides,

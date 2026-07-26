@@ -77,7 +77,7 @@ class GoogleGeminiGenerateContentAdapter(ProviderAdapter):
         payload: dict[str, Any] = {
             "contents": self._build_contents(request, tool_name_map),
             "generationConfig": {
-                "maxOutputTokens": config.max_tokens,
+                "maxOutputTokens": config.max_output_tokens,
             },
         }
         if request.system_prompt:

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import re
@@ -24,6 +24,7 @@ def build_tool_executor_node(
     tool_job_service: ToolJobService | None = None,
     skill_registry: SkillRegistry | None = None,
     skill_runtime_service: SkillRuntimeService | None = None,
+    tool_message_max_chars: int = 24000,
 ):
     async def tool_executor(state: AgentGraphState) -> AgentGraphState:
         append_graph_event(
@@ -134,10 +135,11 @@ def build_tool_executor_node(
                 approval_count=len(pending_approvals),
             )
         else:
+            message_budget = resolve_tool_message_budget(state, tool_message_max_chars)
             state["runtime_messages"] = [
                 *state["runtime_messages"],
                 state["assistant_tool_call_message"],
-                *new_tool_messages,
+                *[apply_tool_message_budget(item, message_budget) for item in new_tool_messages],
             ]
             state["continue_loop"] = True
             append_graph_event(
@@ -420,6 +422,79 @@ def build_tool_message(record: ToolExecutionRecord) -> dict[str, Any]:
         "name": record.tool_key,
         "content": json.dumps(make_json_safe(payload), ensure_ascii=False),
     }
+
+
+TOOL_MESSAGE_MIN_BUDGET_CHARS = 4000
+
+
+def resolve_tool_message_budget(state: AgentGraphState, base_max_chars: int) -> int:
+    """Tighten the tool message budget as the model context fills up.
+
+    The latest provider-reported prompt_tokens is compared against the
+    configured model context window; the closer we are to the window, the
+    smaller the budget for tool result messages fed back into the loop.
+    """
+    usage = state.get("turn_token_usage") or {}
+    prompt_tokens = int(usage.get("prompt_tokens") or 0)
+    context_window = int(state.get("model_context_window") or 0)
+    if prompt_tokens <= 0 or context_window <= 0:
+        return base_max_chars
+    ratio = prompt_tokens / context_window
+    if ratio <= 0.6:
+        return base_max_chars
+    if ratio <= 0.75:
+        return max(TOOL_MESSAGE_MIN_BUDGET_CHARS, base_max_chars // 2)
+    return max(TOOL_MESSAGE_MIN_BUDGET_CHARS, base_max_chars // 4)
+
+
+def apply_tool_message_budget(message: dict[str, Any], max_chars: int) -> dict[str, Any]:
+    """Downgrade an oversized tool message to a structured digest.
+
+    The full output is untouched in tool_results / tool jobs storage; only
+    the model-visible copy inside runtime_messages is reduced.
+    """
+    content = str(message.get("content") or "")
+    if len(content) <= max_chars:
+        return message
+    try:
+        payload = json.loads(content)
+    except (json.JSONDecodeError, ValueError):
+        payload = None
+    if isinstance(payload, dict):
+        digest_payload = {
+            "status": payload.get("status"),
+            "summary": payload.get("summary"),
+            "output_digest": _digest_value(payload.get("output"), max_string_chars=max(200, max_chars // 20)),
+            "truncated": True,
+            "detail_hint": (
+                "Full tool output exceeded the context budget and was replaced by this digest. "
+                "The complete result is persisted in the session tool results."
+            ),
+        }
+        content = json.dumps(make_json_safe(digest_payload), ensure_ascii=False)
+        if len(content) <= max_chars:
+            return {**message, "content": content}
+    return {**message, "content": content[: max(0, max_chars - 16)] + "...(truncated)"}
+
+
+def _digest_value(value: Any, max_string_chars: int, depth: int = 0) -> Any:
+    if depth >= 6:
+        return "...(depth truncated)"
+    if isinstance(value, str):
+        if len(value) > max_string_chars:
+            return value[:max_string_chars] + f"...(+{len(value) - max_string_chars} chars)"
+        return value
+    if isinstance(value, dict):
+        return {
+            str(key): _digest_value(item, max_string_chars, depth + 1)
+            for key, item in list(value.items())[:40]
+        }
+    if isinstance(value, list):
+        digest = [_digest_value(item, max_string_chars, depth + 1) for item in value[:20]]
+        if len(value) > 20:
+            digest.append(f"...(+{len(value) - 20} items)")
+        return digest
+    return value
 
 
 def _collect_worker_dispatches(tool_results: list[dict[str, Any]]) -> list[dict[str, Any]]:

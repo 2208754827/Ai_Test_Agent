@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from langgraph.graph import END, START, StateGraph
 
@@ -39,6 +39,7 @@ def build_agent_graph(
     model_runtime_service: ModelRuntimeService,
     tool_runtime_service: ToolRuntimeService,
     tool_job_service: ToolJobService | None = None,
+    tool_message_max_chars: int = 24000,
 ):
     graph = StateGraph(AgentGraphState)
     graph.add_node(
@@ -88,6 +89,7 @@ def build_agent_graph(
             tool_job_service=tool_job_service,
             skill_registry=skill_registry,
             skill_runtime_service=skill_runtime_service,
+            tool_message_max_chars=tool_message_max_chars,
         ),
     )
     graph.add_node(

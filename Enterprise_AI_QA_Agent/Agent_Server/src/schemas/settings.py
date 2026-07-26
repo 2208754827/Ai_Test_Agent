@@ -24,6 +24,8 @@ class ModelConfigUpdateRequest(BaseModel):
     auth_type: ModelAuthType = "api_key"
     oauth_provider: str | None = None
     oauth_refresh_token: str | None = None
+    context_window: int | None = Field(default=None, ge=1024)
+    max_output_tokens: int | None = Field(default=None, ge=1)
     applications: list[ModelApplication] = Field(
         default_factory=lambda: ["task_execution"]
     )

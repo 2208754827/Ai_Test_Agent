@@ -29,7 +29,23 @@ def build_finalizer_node(
             return state
 
         if state["continue_loop"]:
-            if state["loop_iteration"] + 1 >= state["max_iterations"]:
+            usage = state.get("turn_token_usage") or {}
+            prompt_tokens = int(usage.get("prompt_tokens") or 0)
+            context_window = int(state.get("model_context_window") or 0)
+            if prompt_tokens > 0 and context_window > 0 and prompt_tokens >= context_window * 0.9:
+                state["continue_loop"] = False
+                state["termination_reason"] = "context_budget_exhausted"
+                state["final_response"] = _build_context_exhausted_response(state)
+                append_graph_event(
+                    state,
+                    "graph.context_budget_exhausted",
+                    "finalizer",
+                    "Runtime stopped before the next model call would exceed the context window.",
+                    prompt_tokens=prompt_tokens,
+                    context_window=context_window,
+                    loop_iteration=state["loop_iteration"],
+                )
+            elif state["loop_iteration"] + 1 >= state["max_iterations"]:
                 state["continue_loop"] = False
                 state["termination_reason"] = "max_iterations"
                 state["final_response"] = (
@@ -68,6 +84,27 @@ def build_finalizer_node(
         return state
 
     return finalizer
+
+
+def _build_context_exhausted_response(state: AgentGraphState) -> str:
+    completed_tools = [
+        f"- {item['tool_name']}: {item['summary']}"
+        for item in state["tool_results"]
+        if item["status"] == "completed"
+    ]
+    sections = [
+        "The model context window is nearly full, so the runtime stopped this turn "
+        "instead of issuing a request that would fail.",
+    ]
+    if state["model_response_text"].strip():
+        sections.insert(0, state["model_response_text"].strip())
+    if completed_tools:
+        sections.append("Completed tools so far:\n" + "\n".join(completed_tools))
+    sections.append(
+        "Full tool outputs are persisted in the session records. "
+        "Start a follow-up request to continue from these results."
+    )
+    return "\n\n".join(sections).strip()
 
 
 def _build_pending_approval_response(state: AgentGraphState) -> str:

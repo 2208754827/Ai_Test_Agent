@@ -1,5 +1,6 @@
 ﻿from __future__ import annotations
 
+from src.application.context.token_usage import TokenUsage, normalize_usage
 from src.application.models.model_runtime_service import ModelRuntimeService
 from src.graph.state import AgentGraphState
 from src.registry.tools import ToolRegistry
@@ -113,6 +114,12 @@ def build_model_invoker_node(
             "tool_calls": state["model_tool_calls"],
         }
 
+        latest_usage = normalize_usage(invocation_result.response_summary.get("usage"))
+        accumulated_usage = TokenUsage.model_validate(
+            state.get("turn_token_usage") or {}
+        ).merge_latest(latest_usage)
+        state["turn_token_usage"] = accumulated_usage.model_dump(mode="python")
+
         append_graph_event(
             state,
             "model.response_received",
@@ -126,6 +133,9 @@ def build_model_invoker_node(
             finish_reason=invocation_result.response_summary.get("finish_reason", ""),
             tool_call_count=len(invocation_result.tool_calls),
             loop_iteration=state["loop_iteration"],
+            prompt_tokens=latest_usage.prompt_tokens,
+            completion_tokens=latest_usage.completion_tokens,
+            turn_total_tokens=accumulated_usage.total_tokens,
         )
 
         return state

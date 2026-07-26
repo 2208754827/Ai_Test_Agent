@@ -65,6 +65,7 @@ from src.application.task_pool_service import TaskPoolService
 from src.application.runtime.tool_job_service import ToolJobService
 from src.application.runtime.tool_runtime_service import ToolRuntimeService
 from src.application.context.transcript_hygiene_service import TranscriptHygieneService
+from src.application.context.context_compaction_service import ContextCompactionService
 from src.core.config import get_settings
 from src.graph.builder import build_agent_graph
 from src.infrastructure.channel_config_store import MySQLChannelConfigStore
@@ -220,6 +221,13 @@ async def lifespan(app: FastAPI):
         model_runtime_service=model_runtime_service,
         tool_runtime_service=tool_runtime_service,
         tool_job_service=tool_job_service,
+        tool_message_max_chars=settings.tool_message_max_chars,
+    )
+    context_compaction_service = ContextCompactionService(
+        model_runtime_service=model_runtime_service,
+        transcript_hygiene_service=transcript_hygiene_service,
+        watermark=settings.context_compaction_watermark,
+        max_tail_messages=settings.context_max_tail_messages,
     )
     runtime_service = RuntimeService(
         graph=graph,
@@ -230,6 +238,8 @@ async def lifespan(app: FastAPI):
         transcript_hygiene_service=transcript_hygiene_service,
         max_iterations=settings.runtime_max_iterations,
         session_resource_service=session_resource_service,
+        context_compaction_service=context_compaction_service,
+        context_max_tail_messages=settings.context_max_tail_messages,
     )
 
     app.state.settings = settings

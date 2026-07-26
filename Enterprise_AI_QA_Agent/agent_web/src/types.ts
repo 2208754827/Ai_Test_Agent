@@ -270,6 +270,8 @@ export interface ModelConfigPublic {
   is_default: boolean;
   temperature?: number | null;
   max_tokens: number;
+  context_window: number;
+  max_output_tokens: number;
   has_secret: boolean;
   capabilities: ModelCapabilities;
   capability_overrides: ModelCapabilitiesOverride;
@@ -327,6 +329,8 @@ export interface ModelConfigUpdateRequest {
   auth_type: "api_key" | "oauth2";
   oauth_provider?: OAuthProviderKey | string | null;
   oauth_refresh_token?: string | null;
+  context_window?: number | null;
+  max_output_tokens?: number | null;
   applications: ModelApplication[];
 }
 

@@ -102,7 +102,9 @@ class ModelConfigRecord(BaseModel):
     is_active: bool = False
     is_default: bool = False
     temperature: float | None = None
-    max_tokens: int = 4096
+    max_tokens: int = 8192
+    context_window: int = 128000
+    max_output_tokens: int = 8192
     extra_headers: dict[str, str] = Field(default_factory=dict)
     capabilities: ModelCapabilities = Field(default_factory=ModelCapabilities)
     capability_overrides: ModelCapabilitiesOverride = Field(default_factory=ModelCapabilitiesOverride)
@@ -120,6 +122,8 @@ class ModelConfigRecord(BaseModel):
         self.capabilities.tool_calling = bool(self.supports_tools)
         self.capabilities.vision = bool(self.supports_vision)
         self.capabilities.reasoning = bool(self.supports_reasoning)
+        # Keep the legacy max_tokens field aligned with max_output_tokens.
+        self.max_tokens = int(self.max_output_tokens)
         return self
 
 
@@ -138,7 +142,9 @@ class ModelConfigPublic(BaseModel):
     is_active: bool = False
     is_default: bool = False
     temperature: float | None = None
-    max_tokens: int = 4096
+    max_tokens: int = 8192
+    context_window: int = 128000
+    max_output_tokens: int = 8192
     has_secret: bool = False
     capabilities: ModelCapabilities = Field(default_factory=ModelCapabilities)
     capability_overrides: ModelCapabilitiesOverride = Field(default_factory=ModelCapabilitiesOverride)

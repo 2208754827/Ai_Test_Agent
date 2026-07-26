@@ -1145,6 +1145,16 @@ class SessionService:
             }
         )
         session.metadata["control"] = control
+        turn_usage = dict(runtime_result.state.get("turn_token_usage") or {})
+        if int(turn_usage.get("prompt_tokens") or 0) > 0:
+            session.metadata["context_usage"] = {
+                "prompt_tokens": int(turn_usage.get("prompt_tokens") or 0),
+                "completion_tokens": int(turn_usage.get("completion_tokens") or 0),
+                "total_tokens": int(turn_usage.get("total_tokens") or 0),
+                "context_window": int(runtime_result.state.get("model_context_window") or 0),
+                "turn_id": str(runtime_result.state.get("turn_id") or ""),
+                "updated_at": datetime.utcnow().isoformat(),
+            }
         verification_results = self._verification_service.build_results(
             session_id=session_id,
             turn_id=str(runtime_result.state["turn_id"]),

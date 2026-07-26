@@ -37,7 +37,7 @@ class AnthropicMessagesAdapter(ProviderAdapter):
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": config.model_id,
-            "max_tokens": config.max_tokens,
+            "max_tokens": config.max_output_tokens,
             "system": request.system_prompt,
             "messages": self._build_messages(request, tool_name_map),
         }

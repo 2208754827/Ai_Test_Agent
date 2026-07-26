@@ -45,6 +45,8 @@ class AgentGraphState(TypedDict):
     model_request_payload: dict[str, Any]
     model_response_summary: dict[str, Any]
     model_response_text: str
+    turn_token_usage: dict[str, Any]
+    model_context_window: int
     assistant_tool_call_message: dict[str, Any]
     model_tool_calls: list[dict[str, Any]]
     tool_results: list[dict[str, Any]]

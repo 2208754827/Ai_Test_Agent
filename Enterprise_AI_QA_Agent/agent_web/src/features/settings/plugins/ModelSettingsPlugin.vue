@@ -1,4 +1,4 @@
-﻿<script setup lang="ts">
+<script setup lang="ts">
 import { computed, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, watch } from "vue";
 import { NSelect, type SelectOption } from "naive-ui";
 
@@ -112,6 +112,8 @@ const modelDraft = reactive<ModelConfigUpdateRequest>({
   auth_type: "api_key",
   oauth_provider: null,
   oauth_refresh_token: null,
+  context_window: null,
+  max_output_tokens: null,
   applications: ["task_execution"],
 });
 
@@ -266,6 +268,8 @@ function resetModelDraft() {
   modelDraft.auth_type = "api_key";
   modelDraft.oauth_provider = null;
   modelDraft.oauth_refresh_token = null;
+  modelDraft.context_window = null;
+  modelDraft.max_output_tokens = null;
   modelDraft.applications = ["task_execution"];
   resetOAuthFlow();
   applyCapabilityDraft(inferCapabilities("", modelDraft.transport));
@@ -291,6 +295,8 @@ function openEditModal(item: ModelConfigPublic) {
   modelDraft.auth_type = item.auth_type ?? "api_key";
   modelDraft.oauth_provider = item.oauth_provider ?? null;
   modelDraft.oauth_refresh_token = null;
+  modelDraft.context_window = item.context_window ?? null;
+  modelDraft.max_output_tokens = item.max_output_tokens ?? null;
   modelDraft.applications = [...(item.applications || ["task_execution"])];
   oauthCustomBaseUrl.value = item.api_base_url;
   resetOAuthFlow();
@@ -367,6 +373,12 @@ function hasCapabilityOverrides(overrides: ModelCapabilitiesOverride | undefined
   return Object.values(overrides).some((value) => value !== null && value !== undefined);
 }
 
+function normalizePositiveInt(value: number | null | undefined): number | null {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return Math.floor(parsed);
+}
+
 async function saveModel() {
   if (isOAuth.value && oauthHasModelListing.value && oauthAvailableModels.value.length > 0) {
     if (!oauthSelectedModelId.value?.trim()) {
@@ -430,6 +442,8 @@ async function saveModel() {
     auth_type: modelDraft.auth_type,
     oauth_provider: isOAuth.value ? (modelDraft.oauth_provider || null) : null,
     oauth_refresh_token: isOAuth.value ? (modelDraft.oauth_refresh_token?.trim() || null) : null,
+    context_window: normalizePositiveInt(modelDraft.context_window),
+    max_output_tokens: normalizePositiveInt(modelDraft.max_output_tokens),
     applications: [...modelDraft.applications],
   };
 
@@ -980,6 +994,29 @@ async function deleteModel(item: ModelConfigPublic) {
               <small>{{ t("modelSettings.config_name_hint") }}</small>
             </label>
           </template>
+
+          <label>
+            <span>{{ t("modelSettings.context_window") }}</span>
+            <input
+              v-model.number="modelDraft.context_window"
+              type="number"
+              min="1024"
+              step="1024"
+              placeholder="128000"
+            />
+            <small>{{ t("modelSettings.context_window_hint") }}</small>
+          </label>
+
+          <label>
+            <span>{{ t("modelSettings.max_output_tokens") }}</span>
+            <input
+              v-model.number="modelDraft.max_output_tokens"
+              type="number"
+              min="1"
+              placeholder="8192"
+            />
+            <small>{{ t("modelSettings.max_output_tokens_hint") }}</small>
+          </label>
 
           <div class="full settings-application-section">
             <span class="settings-application-section__title">{{ t("modelSettings.applications") }}</span>
