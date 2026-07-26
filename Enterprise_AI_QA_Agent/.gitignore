@@ -2,3 +2,4 @@
 # provider contract regression suite versioned with the provider adapters.
 !Agent_Server/tests/
 !Agent_Server/tests/test_mail_service.py
+/TRAE_AI_creativity_submission/

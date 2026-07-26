@@ -13,7 +13,6 @@ from fastapi.middleware.cors import CORSMiddleware
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
-
 from src.api.routes.attachments import router as attachments_router
 from src.api.routes.api_docs import router as api_docs_router
 from src.api.routes.compatibility import router as compatibility_router
