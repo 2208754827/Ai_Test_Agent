@@ -21,6 +21,8 @@ import hiIN from "./locales/hi-IN";
 import idID from "./locales/id-ID";
 import viVN from "./locales/vi-VN";
 import thTH from "./locales/th-TH";
+import "katex/dist/katex.min.css";
+import "highlight.js/styles/github.css";
 import "./styles.css";
 
 // Register all locale messages.

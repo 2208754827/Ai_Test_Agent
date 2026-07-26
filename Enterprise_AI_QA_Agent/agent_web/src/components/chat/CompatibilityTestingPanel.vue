@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 
+import AssistantMarkdown from "./AssistantMarkdown.vue";
 import { api } from "../../services/api";
 import { useSessionStore } from "../../stores/session";
 import type {
@@ -1188,7 +1189,9 @@ onUnmounted(() => {
       </div>
       <details class="compatibility-report-markdown">
         <summary>查看 Markdown 报告</summary>
-        <pre>{{ executionReport.markdown }}</pre>
+        <div class="conversation-entry-markdown compatibility-report-markdown-body">
+          <AssistantMarkdown :content="executionReport.markdown" />
+        </div>
       </details>
     </div>
 
@@ -1698,13 +1701,13 @@ onUnmounted(() => {
   color: var(--text-muted);
 }
 
-.compatibility-report-markdown pre {
+.compatibility-report-markdown-body {
   max-height: 280px;
   overflow: auto;
   margin: 0;
-  white-space: pre-wrap;
   word-break: break-word;
   color: var(--text);
+  font-size: 13px;
 }
 
 .compatibility-evidence-item {

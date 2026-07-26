@@ -113,12 +113,14 @@ class RuntimeService:
         session: SessionRecord,
         approval: dict,
         on_model_chunk: Callable[[str], Awaitable[None]] | None = None,
+        event_queue: asyncio.Queue | None = None,
     ) -> RuntimeTurnResult | None:
         pending_turn = dict(session.metadata.get("pending_turn") or {})
         if not pending_turn:
             return None
 
         state = self._state_from_pending_turn(session, pending_turn)
+        state["_event_queue"] = event_queue
         await self._attach_session_resources(state)
         turn_id = str(state["turn_id"])
         tool_call = ModelToolCall(
@@ -244,9 +246,11 @@ class RuntimeService:
         snapshot: SessionSnapshot,
         resume_reason: str,
         on_model_chunk: Callable[[str], Awaitable[None]] | None = None,
+        event_queue: asyncio.Queue | None = None,
     ) -> RuntimeTurnResult:
         self.clear_interrupt(session.id)
         state = self._state_from_snapshot(session, snapshot)
+        state["_event_queue"] = event_queue
         await self._attach_session_resources(state)
         state["control_state"] = "resuming"
         state["interrupt_requested"] = False

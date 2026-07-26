@@ -237,6 +237,16 @@ async def _resolve_tool_call(
         }
 
     if tool.key == "skill":
+        append_graph_event(
+            state,
+            "tool.execution_started",
+            "tool_executor",
+            f"Tool '{tool.key}' execution started.",
+            tool_key=tool.key,
+            tool_name=tool.name,
+            call_id=tool_call.id,
+            arguments=tool_call.arguments,
+        )
         result = _run_skill_loader(
             state=state,
             tool_call=tool_call,
@@ -244,6 +254,17 @@ async def _resolve_tool_call(
             permission_service=permission_service,
             skill_registry=skill_registry,
             skill_runtime_service=skill_runtime_service,
+        )
+        append_graph_event(
+            state,
+            "tool.execution_completed" if result.status == "completed" else "tool.execution_failed",
+            "tool_executor",
+            f"Tool '{tool.key}' finished with status '{result.status}'.",
+            tool_key=tool.key,
+            tool_name=tool.name,
+            call_id=tool_call.id,
+            status=result.status,
+            summary=result.summary,
         )
         return {
             "tool_result": result.model_dump(mode="python"),
@@ -264,6 +285,17 @@ async def _resolve_tool_call(
             ),
             input=tool_call.arguments,
             output={"error": "invalid_tool_arguments", "validation_errors": validation_errors},
+        )
+        append_graph_event(
+            state,
+            "tool.execution_failed",
+            "tool_executor",
+            f"Tool '{tool.key}' arguments failed validation.",
+            tool_key=tool.key,
+            tool_name=tool.name,
+            call_id=tool_call.id,
+            status="failed",
+            summary=result.summary,
         )
         return {
             "tool_result": result.model_dump(mode="python"),

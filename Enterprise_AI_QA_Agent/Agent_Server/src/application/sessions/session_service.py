@@ -339,6 +339,7 @@ class SessionService:
                 snapshot,
                 resume_reason=payload.reason or "manual_resume",
                 on_model_chunk=stream_chunk_handler,
+                event_queue=self._store.get_queue(session_id),
             )
             return await self._finalize_runtime_result(
                 session=session,
@@ -504,6 +505,7 @@ class SessionService:
                     session,
                     approval.model_dump(mode="python"),
                     on_model_chunk=stream_chunk_handler,
+                    event_queue=self._store.get_queue(session_id),
                 )
                 if continuation is None:
                     return

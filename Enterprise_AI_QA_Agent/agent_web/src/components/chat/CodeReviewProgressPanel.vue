@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 
+import AssistantMarkdown from "./AssistantMarkdown.vue";
 import { t } from "../../services/i18n";
 import { api } from "../../services/api";
 import { useSessionStore } from "../../stores/session";
 import type { ChatMessage, SessionDetail, ToolApprovalRequest, WorkerDispatchRecord } from "../../types";
 import { formatServerDateTime } from "../../utils/datetime";
+import { toolOutputToMarkdown } from "../../utils/toolOutput";
 
 const sessionStore = useSessionStore();
 
@@ -484,14 +486,22 @@ function closeTaskDetail() {
                         <span>{{ formatTime(message.created_at) }}</span>
                       </div>
                     </summary>
-                    <pre>{{ message.content }}</pre>
+                    <div class="conversation-entry-markdown review-task-message-markdown">
+                      <AssistantMarkdown :content="toolOutputToMarkdown(message.content)" />
+                    </div>
                   </details>
                   <template v-else>
                     <div class="review-task-message-head">
                       <strong>{{ messageRoleLabel(message.role) }}</strong>
                       <span>{{ formatTime(message.created_at) }}</span>
                     </div>
-                    <pre>{{ message.content }}</pre>
+                    <div
+                      v-if="message.role === 'assistant'"
+                      class="conversation-entry-markdown review-task-message-markdown"
+                    >
+                      <AssistantMarkdown :content="message.content" />
+                    </div>
+                    <pre v-else>{{ message.content }}</pre>
                   </template>
                 </article>
               </div>
@@ -733,6 +743,14 @@ function closeTaskDetail() {
   font-family: "Consolas", "SFMono-Regular", monospace;
   font-size: 12px;
   overflow-x: auto;
+}
+
+.review-task-message-markdown {
+  margin-top: 8px;
+  max-height: 320px;
+  overflow: auto;
+  font-size: 13px;
+  line-height: 1.6;
 }
 
 .registry-tag.running {
