@@ -6,16 +6,36 @@ import json
 from src.application.model_clients.provider_profiles import (
     normalize_provider,
     normalize_transport,
-    resolve_provider_profile,
 )
 from src.core.config import Settings
 from src.infrastructure.sqlalchemy_runtime import mysql_raw_connection
 from src.schemas.model_config import (
+    ModelCapabilities,
     ModelCapabilitiesOverride,
     ModelConfigPublic,
     ModelConfigRecord,
 )
 from src.schemas.settings import ModelConfigUpdateRequest
+
+
+# All model capabilities are enabled by default on the backend; the frontend no
+# longer exposes per-model capability toggles. Legacy capability_overrides rows
+# still apply on top for backward compatibility.
+_DEFAULT_CAPABILITIES = ModelCapabilities(
+    text_input=True,
+    text_output=True,
+    tool_calling=True,
+    vision=True,
+    multi_image=True,
+    file_input=True,
+    pdf_input=True,
+    reasoning=True,
+    json_mode=True,
+    streaming=True,
+    parallel_tool_calls=True,
+    image_url_input=True,
+    image_base64_input=True,
+)
 
 
 class MySQLModelConfigStore:
@@ -612,13 +632,14 @@ class MySQLModelConfigStore:
 
     def _row_to_record(self, row: dict) -> ModelConfigRecord:
         provider = normalize_provider(row["provider"] or "")
-        profile = resolve_provider_profile(provider)
         transport = normalize_transport(row.get("transport"), provider=provider)
         capability_overrides = self._parse_capability_overrides(row.get("capability_overrides"))
-        capabilities = capability_overrides.apply_to(profile.capabilities)
+        capabilities = capability_overrides.apply_to(_DEFAULT_CAPABILITIES)
         base_url = (row["base_url"] or "").rstrip("/")
         if transport == "openai_chat_completions" and base_url.endswith("/chat/completions"):
             base_url = base_url[: -len("/chat/completions")]
+        if transport == "openai_responses" and base_url.endswith("/responses"):
+            base_url = base_url[: -len("/responses")]
         if transport == "anthropic_messages" and base_url.endswith("/v1/messages"):
             base_url = base_url[: -len("/v1/messages")]
         if transport == "google_gemini_generate_content" and ":generateContent" in base_url:

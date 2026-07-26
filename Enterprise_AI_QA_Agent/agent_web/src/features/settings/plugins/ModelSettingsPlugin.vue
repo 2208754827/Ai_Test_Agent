@@ -5,8 +5,6 @@ import { NSelect, type SelectOption } from "naive-ui";
 import { api } from "../../../services/api";
 import { t } from "../../../services/i18n";
 import type {
-  ModelCapabilities,
-  ModelCapabilitiesOverride,
   ModelApplication,
   ModelConfigPublic,
   ModelConfigUpdateRequest,
@@ -16,16 +14,10 @@ import type {
 } from "../../../types";
 
 type MessageTone = "success" | "error";
-type CapabilityKey = keyof ModelCapabilities;
-
-interface CapabilityOption {
-  key: CapabilityKey;
-  label: string;
-  hint: string;
-}
 
 const TRANSPORT_OPTIONS: SelectOption[] = [
   { label: "OpenAI Chat Completions", value: "openai_chat_completions" },
+  { label: "OpenAI Responses", value: "openai_responses" },
   { label: "Anthropic Messages", value: "anthropic_messages" },
   { label: "Google Gemini Generate Content", value: "google_gemini_generate_content" },
 ];
@@ -40,7 +32,6 @@ const messageVisible = ref(false);
 const messageText = ref("");
 const messageTone = ref<MessageTone>("success");
 let messageTimer: ReturnType<typeof setTimeout> | null = null;
-const showCapabilities = ref(false);
 
 // OAuth provider presets
 const oauthProviders = ref<OAuthProviderProfile[]>([]);
@@ -57,20 +48,6 @@ const oauthSelectedModelId = ref<string | null>(null);
 // Azure AD and providers that need a custom resource base URL
 const oauthCustomBaseUrl = ref("");
 
-const capabilityOptions: CapabilityOption[] = [
-  { key: "tool_calling", label: t("modelSettings.cap_tool_calling"), hint: t("modelSettings.cap_tool_calling_hint") },
-  { key: "vision", label: t("modelSettings.cap_vision"), hint: t("modelSettings.cap_vision_hint") },
-  { key: "reasoning", label: t("modelSettings.cap_reasoning"), hint: t("modelSettings.cap_reasoning_hint") },
-  { key: "multi_image", label: t("modelSettings.cap_multi_image"), hint: t("modelSettings.cap_multi_image_hint") },
-  { key: "file_input", label: t("modelSettings.cap_file_input"), hint: t("modelSettings.cap_file_input_hint") },
-  { key: "pdf_input", label: t("modelSettings.cap_pdf_input"), hint: t("modelSettings.cap_pdf_input_hint") },
-  { key: "json_mode", label: t("modelSettings.cap_json_mode"), hint: t("modelSettings.cap_json_mode_hint") },
-  { key: "streaming", label: t("modelSettings.cap_streaming"), hint: t("modelSettings.cap_streaming_hint") },
-  { key: "parallel_tool_calls", label: t("modelSettings.cap_parallel_tools"), hint: t("modelSettings.cap_parallel_tools_hint") },
-  { key: "image_url_input", label: t("modelSettings.cap_image_url"), hint: t("modelSettings.cap_image_url_hint") },
-  { key: "image_base64_input", label: t("modelSettings.cap_image_base64"), hint: t("modelSettings.cap_image_base64_hint") },
-];
-
 const applicationOptions: Array<{ value: ModelApplication; label: string; hint: string }> = [
   {
     value: "task_execution",
@@ -83,22 +60,6 @@ const applicationOptions: Array<{ value: ModelApplication; label: string; hint: 
     hint: t("modelSettings.application_embedding_retrieval_hint"),
   },
 ];
-
-const baseCapabilities: ModelCapabilities = {
-  text_input: true,
-  text_output: true,
-  tool_calling: true,
-  vision: false,
-  multi_image: false,
-  file_input: false,
-  pdf_input: false,
-  reasoning: true,
-  json_mode: false,
-  streaming: true,
-  parallel_tool_calls: false,
-  image_url_input: true,
-  image_base64_input: true,
-};
 
 const modelDraft = reactive<ModelConfigUpdateRequest>({
   model_name: "",
@@ -117,8 +78,6 @@ const modelDraft = reactive<ModelConfigUpdateRequest>({
   applications: ["task_execution"],
 });
 
-const capabilityDraft = reactive<ModelCapabilities>({ ...baseCapabilities });
-
 const isEditing = computed(() => Boolean(editingModelName.value));
 const isOAuth = computed(() => modelDraft.auth_type === "oauth2");
 const appliesToTaskExecution = computed(() =>
@@ -134,21 +93,6 @@ const selectedApplication = computed<ModelApplication>({
 const selectedOAuthProfile = computed<OAuthProviderProfile | null>(() => {
   if (!modelDraft.oauth_provider) return null;
   return oauthProviders.value.find((p) => p.key === modelDraft.oauth_provider) ?? null;
-});
-
-const providerOptions = computed<SelectOption[]>(() => {
-  const seen = new Set<string>();
-  return modelConfigs.value
-    .map((item) => item.provider.trim())
-    .filter((provider) => {
-      if (!provider) return false;
-      const normalized = provider.toLowerCase();
-      if (seen.has(normalized)) return false;
-      seen.add(normalized);
-      return true;
-    })
-    .sort((left, right) => left.localeCompare(right))
-    .map((provider) => ({ label: provider, value: provider }));
 });
 
 const oauthProviderOptions = computed<SelectOption[]>(() =>
@@ -198,14 +142,6 @@ onBeforeUnmount(() => {
   }
   stopPageActivity();
 });
-
-watch(
-  () => [showEditorModal.value, modelDraft.provider, modelDraft.transport, modelDraft.use_provider_defaults] as const,
-  ([visible, provider, transport, useProviderDefaults]) => {
-    if (!visible || !useProviderDefaults) return;
-    applyCapabilityDraft(inferCapabilities(provider, transport || "openai_chat_completions"));
-  },
-);
 
 watch(appliesToTaskExecution, (enabled) => {
   if (!enabled) modelDraft.is_active = false;
@@ -272,13 +208,11 @@ function resetModelDraft() {
   modelDraft.max_output_tokens = null;
   modelDraft.applications = ["task_execution"];
   resetOAuthFlow();
-  applyCapabilityDraft(inferCapabilities("", modelDraft.transport));
 }
 
 function openCreateModal() {
   editingModelName.value = null;
   resetModelDraft();
-  showCapabilities.value = false;
   showEditorModal.value = true;
 }
 
@@ -290,8 +224,8 @@ function openEditModal(item: ModelConfigPublic) {
   modelDraft.base_url = item.api_base_url;
   modelDraft.api_key = null;
   modelDraft.is_active = item.is_active;
-  modelDraft.use_provider_defaults = !hasCapabilityOverrides(item.capability_overrides);
-  modelDraft.capability_overrides = { ...item.capability_overrides };
+  modelDraft.use_provider_defaults = true;
+  modelDraft.capability_overrides = {};
   modelDraft.auth_type = item.auth_type ?? "api_key";
   modelDraft.oauth_provider = item.oauth_provider ?? null;
   modelDraft.oauth_refresh_token = null;
@@ -309,68 +243,12 @@ function openEditModal(item: ModelConfigPublic) {
       oauthSelectedModelId.value = item.name;
     }
   }
-  applyCapabilityDraft(item.capabilities);
-  showCapabilities.value = false;
   showEditorModal.value = true;
 }
 
 function closeEditorModal() {
   showEditorModal.value = false;
   editingModelName.value = null;
-}
-
-function applyCapabilityDraft(capabilities: Partial<ModelCapabilities>) {
-  capabilityOptions.forEach((option) => {
-    capabilityDraft[option.key] = Boolean(capabilities[option.key] ?? baseCapabilities[option.key]);
-  });
-}
-
-function inferCapabilities(provider: string, transport: string): ModelCapabilities {
-  const normalizedProvider = provider.trim().toLowerCase();
-  const normalizedTransport = transport.trim().toLowerCase();
-  const capabilities: ModelCapabilities = { ...baseCapabilities };
-
-  const openAiVisionProviders = new Set([
-    "openai", "anthropic", "deepseek", "qwen", "dashscope", "zhipu", "glm",
-    "openrouter", "xai", "minimax", "volcengine", "doubao", "hunyuan",
-    "baidu", "ernie", "moonshot", "kimi",
-  ]);
-
-  if (normalizedTransport === "anthropic_messages") {
-    capabilities.vision = true;
-    capabilities.image_url_input = false;
-    capabilities.image_base64_input = true;
-    return capabilities;
-  }
-
-  if (normalizedTransport === "google_gemini_generate_content") {
-    capabilities.vision = true;
-    capabilities.multi_image = true;
-    capabilities.file_input = true;
-    capabilities.image_url_input = false;
-    capabilities.image_base64_input = true;
-    return capabilities;
-  }
-
-  capabilities.image_url_input = true;
-  capabilities.image_base64_input = true;
-  if (openAiVisionProviders.has(normalizedProvider)) {
-    capabilities.vision = true;
-  }
-  return capabilities;
-}
-
-function buildCapabilityOverrides(): ModelCapabilitiesOverride {
-  const overrides: ModelCapabilitiesOverride = {};
-  capabilityOptions.forEach((option) => {
-    overrides[option.key] = capabilityDraft[option.key];
-  });
-  return overrides;
-}
-
-function hasCapabilityOverrides(overrides: ModelCapabilitiesOverride | undefined | null) {
-  if (!overrides) return false;
-  return Object.values(overrides).some((value) => value !== null && value !== undefined);
 }
 
 function normalizePositiveInt(value: number | null | undefined): number | null {
@@ -408,7 +286,7 @@ async function saveModel() {
       return;
     }
   } else {
-    if (!modelDraft.provider.trim() || !modelDraft.transport?.trim() || !modelDraft.base_url.trim()) {
+    if (!modelDraft.transport?.trim() || !modelDraft.base_url.trim()) {
       showMessage("error", t("modelSettings.provider_transport_url_required"));
       return;
     }
@@ -437,8 +315,8 @@ async function saveModel() {
     base_url,
     api_key: isOAuth.value ? null : (modelDraft.api_key?.trim() || null),
     is_active: modelDraft.is_active,
-    use_provider_defaults: modelDraft.use_provider_defaults ?? true,
-    capability_overrides: modelDraft.use_provider_defaults ? {} : buildCapabilityOverrides(),
+    use_provider_defaults: true,
+    capability_overrides: {},
     auth_type: modelDraft.auth_type,
     oauth_provider: isOAuth.value ? (modelDraft.oauth_provider || null) : null,
     oauth_refresh_token: isOAuth.value ? (modelDraft.oauth_refresh_token?.trim() || null) : null,
@@ -684,11 +562,6 @@ async function deleteModel(item: ModelConfigPublic) {
           </div>
 
           <div class="settings-model-card__provider-row">
-            <i class="fa-solid fa-server"></i>
-            <span>{{ item.provider }}</span>
-          </div>
-
-          <div class="settings-model-card__provider-row">
             <i class="fa-solid fa-arrows-rotate"></i>
             <span>{{ item.transport }}</span>
           </div>
@@ -821,20 +694,6 @@ async function deleteModel(item: ModelConfigPublic) {
             <label>
               <span>{{ t("modelSettings.model_name") }}</span>
               <input v-model="modelDraft.model_name" type="text" placeholder="claude-opus-4-7 / gpt-5.4" />
-            </label>
-
-            <label class="settings-provider-field">
-              <span>{{ t("modelSettings.provider") }}</span>
-              <NSelect
-                v-model:value="modelDraft.provider"
-                class="settings-provider-select"
-                menu-class="settings-provider-select-menu"
-                filterable
-                tag
-                clearable
-                :options="providerOptions"
-                :placeholder="t('modelSettings.provider_ph')"
-              />
             </label>
 
             <label class="settings-provider-field">
@@ -1045,50 +904,6 @@ async function deleteModel(item: ModelConfigPublic) {
             <span>{{ t("modelSettings.set_as_default") }}</span>
           </label>
         </div>
-
-        <!-- Capability overrides (API key mode only; hidden for OAuth to keep the form clean) -->
-        <section v-if="!isOAuth" class="settings-capability-panel">
-          <div
-            class="settings-capability-panel__head"
-            style="cursor: pointer; user-select: none;"
-            @click="showCapabilities = !showCapabilities"
-          >
-            <div style="display: flex; align-items: flex-start; gap: 8px;">
-              <i
-                class="fa-solid"
-                :class="showCapabilities ? 'fa-chevron-down' : 'fa-chevron-right'"
-                style="margin-top: 4px;"
-              ></i>
-              <div>
-            <strong>{{ t("modelSettings.add_model") }}</strong>
-                <p>{{ t("modelSettings.capability_override_desc") }}</p>
-              </div>
-            </div>
-            <label class="checkbox-row" @click.stop>
-              <input v-model="modelDraft.use_provider_defaults" type="checkbox" />
-              <span>{{ t("modelSettings.follow_default_capabilities") }}</span>
-            </label>
-          </div>
-
-          <div v-show="showCapabilities" class="settings-capability-grid">
-            <label
-              v-for="option in capabilityOptions"
-              :key="option.key"
-              class="settings-capability-option"
-              :class="{ 'is-disabled': modelDraft.use_provider_defaults }"
-            >
-              <input
-                v-model="capabilityDraft[option.key]"
-                type="checkbox"
-                :disabled="modelDraft.use_provider_defaults"
-              />
-              <div>
-                <strong>{{ option.label }}</strong>
-                <small>{{ option.hint }}</small>
-              </div>
-            </label>
-          </div>
-        </section>
 
         <div class="settings-modal-actions">
           <button type="button" class="secondary-btn narrow" :disabled="saving" @click="closeEditorModal">{{ t("modelSettings.cancel") }}</button>

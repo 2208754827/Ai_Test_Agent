@@ -14,7 +14,7 @@ from src.schemas.model_config import (
 
 class ModelConfigUpdateRequest(BaseModel):
     model_name: str
-    provider: str
+    provider: str = ""
     transport: ModelTransport | None = None
     base_url: str
     api_key: str | None = None
@@ -41,7 +41,7 @@ class ModelConfigUpdateRequest(BaseModel):
 
 class ModelConfigEditRequest(BaseModel):
     model_name: str
-    provider: str
+    provider: str = ""
     transport: ModelTransport | None = None
     base_url: str
     api_key: str | None = None

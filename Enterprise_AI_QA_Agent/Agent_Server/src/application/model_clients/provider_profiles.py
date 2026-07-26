@@ -215,6 +215,7 @@ def normalize_transport(
     if value in {
         "anthropic_messages",
         "openai_chat_completions",
+        "openai_responses",
         "google_gemini_generate_content",
     }:
         return value  # type: ignore[return-value]

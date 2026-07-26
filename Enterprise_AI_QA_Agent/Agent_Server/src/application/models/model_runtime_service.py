@@ -249,8 +249,8 @@ class ModelRuntimeService:
         config: ModelConfigRecord,
         request: ModelInvocationRequest,
     ) -> ModelInvocationRequest:
-        """Normalize tool-call transcript history for strict OpenAI-compatible providers."""
-        if config.transport != "openai_chat_completions":
+        """Normalize tool-call transcript history for strict OpenAI-style protocols."""
+        if config.transport not in {"openai_chat_completions", "openai_responses"}:
             return request
 
         sanitized = self._sanitize_structured_tool_messages(request.structured_messages)

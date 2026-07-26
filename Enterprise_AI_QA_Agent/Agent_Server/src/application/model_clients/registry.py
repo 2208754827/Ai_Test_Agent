@@ -4,6 +4,7 @@ from src.application.model_clients.anthropic_client import AnthropicMessagesClie
 from src.application.model_clients.base import ProviderClient
 from src.application.model_clients.google_client import GoogleGenAIClient
 from src.application.model_clients.openai_client import OpenAIChatClient
+from src.application.model_clients.openai_responses_client import OpenAIResponsesClient
 from src.application.model_clients.provider_profiles import normalize_provider, normalize_transport
 from src.schemas.model_config import ModelConfigRecord
 
@@ -25,4 +26,6 @@ def resolve_client(
         return AnthropicMessagesClient(timeout_seconds=timeout_seconds)
     if transport == "google_gemini_generate_content":
         return GoogleGenAIClient(timeout_seconds=timeout_seconds)
+    if transport == "openai_responses":
+        return OpenAIResponsesClient(timeout_seconds=timeout_seconds)
     return OpenAIChatClient(timeout_seconds=timeout_seconds)

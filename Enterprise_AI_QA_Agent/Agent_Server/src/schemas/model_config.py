@@ -13,6 +13,7 @@ from src.schemas.tool_runtime import ModelToolCall
 ModelTransport = Literal[
     "anthropic_messages",
     "openai_chat_completions",
+    "openai_responses",
     "google_gemini_generate_content",
 ]
 
