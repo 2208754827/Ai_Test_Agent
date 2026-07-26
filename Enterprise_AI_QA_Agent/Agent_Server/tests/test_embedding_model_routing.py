@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+from types import SimpleNamespace
+
 import pytest
 
-from src.application.embedding_adapters.google import GoogleEmbeddingAdapter
-from src.application.embedding_adapters.openai_compatible import (
-    OpenAICompatibleEmbeddingAdapter,
+from src.application.model_clients.embeddings import (
+    GoogleEmbeddingClient,
+    OpenAICompatibleEmbeddingClient,
+    resolve_embedding_client,
 )
-from src.application.embedding_adapters.registry import EmbeddingAdapterRegistry
+from src.application.model_clients.google_client import GoogleGenAIClient
 from src.schemas.model_config import ModelConfigRecord
 from src.schemas.settings import ModelConfigUpdateRequest
 
@@ -42,41 +46,136 @@ def test_model_application_defaults_and_requires_single_selection() -> None:
         )
 
 
-def test_openai_compatible_embedding_request() -> None:
-    request = OpenAICompatibleEmbeddingAdapter().build_request(
-        _config(),
-        "secret",
-        ["first", "second"],
+def test_embedding_client_dispatch_follows_transport() -> None:
+    # openai protocol -> OpenAI-compatible /embeddings, regardless of vendor
+    assert isinstance(resolve_embedding_client(_config()), OpenAICompatibleEmbeddingClient)
+    assert isinstance(
+        resolve_embedding_client(_config(provider="qwen")),
+        OpenAICompatibleEmbeddingClient,
+    )
+    # Google exposing an OpenAI-compatible base URL keeps the openai protocol
+    assert isinstance(
+        resolve_embedding_client(
+            _config(
+                provider="google",
+                api_base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+            )
+        ),
+        OpenAICompatibleEmbeddingClient,
+    )
+    # google protocol -> native embedContent URL format
+    assert isinstance(
+        resolve_embedding_client(
+            _config(provider="google", transport="google_gemini_generate_content")
+        ),
+        GoogleEmbeddingClient,
     )
 
-    assert request.url == "https://api.openai.com/v1/embeddings"
-    assert request.headers["Authorization"] == "Bearer secret"
-    assert request.payload == {
-        "model": "text-embedding-3-small",
-        "input": ["first", "second"],
-        "encoding_format": "float",
-    }
+
+def test_embedding_registry_rejects_anthropic_protocol() -> None:
+    with pytest.raises(ValueError, match="does not expose an embeddings API"):
+        resolve_embedding_client(
+            _config(provider="anthropic", transport="anthropic_messages")
+        )
 
 
-def test_google_embedding_request_supports_api_key_and_versioned_base_url() -> None:
+def test_google_base_url_strips_version_suffix() -> None:
+    assert (
+        GoogleGenAIClient._normalize_base_url(
+            "https://generativelanguage.googleapis.com/v1beta"
+        )
+        == "https://generativelanguage.googleapis.com"
+    )
+    assert (
+        GoogleGenAIClient._normalize_base_url("https://proxy.example.test/v1/")
+        == "https://proxy.example.test"
+    )
+    assert (
+        GoogleGenAIClient._normalize_base_url("https://proxy.example.test")
+        == "https://proxy.example.test"
+    )
+
+
+def test_openai_embedding_orders_vectors_by_index(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeEmbeddings:
+        async def create(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                data=[
+                    SimpleNamespace(index=1, embedding=[0.4, 0.5]),
+                    SimpleNamespace(index=0, embedding=[0.1, 0.2]),
+                ]
+            )
+
+    class _FakeAsyncOpenAI:
+        def __init__(self, **kwargs):
+            captured["client_kwargs"] = kwargs
+            self.embeddings = _FakeEmbeddings()
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc_info):
+            return False
+
+    monkeypatch.setattr(
+        "src.application.model_clients.embeddings.AsyncOpenAI",
+        _FakeAsyncOpenAI,
+    )
+
+    vectors = asyncio.run(
+        OpenAICompatibleEmbeddingClient().embed(_config(), "secret", ["first", "second"])
+    )
+
+    assert vectors == [[0.1, 0.2], [0.4, 0.5]]
+    assert captured["model"] == "text-embedding-3-small"
+    assert captured["input"] == ["first", "second"]
+    assert captured["encoding_format"] == "float"
+    client_kwargs = captured["client_kwargs"]
+    assert client_kwargs["api_key"] == "secret"
+    assert client_kwargs["base_url"] == "https://api.openai.com/v1"
+
+
+def test_google_embedding_uses_sdk_and_prefixes_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeModels:
+        async def embed_content(self, **kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(
+                embeddings=[
+                    SimpleNamespace(values=[0.6, 0.8]),
+                    SimpleNamespace(values=[1.0, 0.0]),
+                ]
+            )
+
+    class _FakeGenAIClient:
+        def __init__(self, **kwargs):
+            captured["client_kwargs"] = kwargs
+            self.aio = SimpleNamespace(models=_FakeModels())
+
+    monkeypatch.setattr(
+        "src.application.model_clients.embeddings.genai.Client",
+        _FakeGenAIClient,
+    )
+
     config = _config(
         provider="google",
+        transport="google_gemini_generate_content",
         name="gemini-embedding-001",
         model_id="gemini-embedding-001",
         api_base_url="https://generativelanguage.googleapis.com/v1beta",
     )
-    request = GoogleEmbeddingAdapter().build_request(config, "secret", ["hello"])
+    vectors = asyncio.run(GoogleEmbeddingClient().embed(config, "secret", ["hello", "world"]))
 
-    assert request.url == (
-        "https://generativelanguage.googleapis.com/v1beta/"
-        "models/gemini-embedding-001:batchEmbedContents"
+    assert vectors == [[0.6, 0.8], [1.0, 0.0]]
+    assert captured["model"] == "models/gemini-embedding-001"
+    assert captured["contents"] == ["hello", "world"]
+    client_kwargs = captured["client_kwargs"]
+    assert client_kwargs["api_key"] == "secret"
+    assert (
+        client_kwargs["http_options"].base_url
+        == "https://generativelanguage.googleapis.com"
     )
-    assert request.headers["x-goog-api-key"] == "secret"
-    assert request.payload["requests"][0]["content"]["parts"] == [
-        {"text": "hello"}
-    ]
-
-
-def test_embedding_registry_rejects_anthropic() -> None:
-    with pytest.raises(ValueError, match="does not expose an embeddings API"):
-        EmbeddingAdapterRegistry().resolve(_config(provider="anthropic"))

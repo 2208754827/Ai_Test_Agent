@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 import json
 
-from src.application.model_adapters.provider_profiles import (
+from src.application.model_clients.provider_profiles import (
     normalize_provider,
     normalize_transport,
     resolve_provider_profile,

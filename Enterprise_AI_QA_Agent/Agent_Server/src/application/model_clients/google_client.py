@@ -1,0 +1,392 @@
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from google import genai
+from google.genai import errors as genai_errors
+from google.genai import types as genai_types
+
+from src.application.model_clients.base import (
+    ProviderClientError,
+    TextDeltaHandler,
+    build_tool_name_map,
+    remap_tool_calls,
+    response_to_dict,
+)
+from src.schemas.model_config import ContentPart, ModelConfigRecord, ModelInvocationRequest, UnifiedMessage
+from src.schemas.tool_runtime import ModelToolCall
+
+_SCHEMA_ALLOWED_KEYS = {
+    "type",
+    "description",
+    "properties",
+    "items",
+    "required",
+    "enum",
+    "format",
+    "nullable",
+    "minimum",
+    "maximum",
+    "minItems",
+    "maxItems",
+    "minLength",
+    "maxLength",
+}
+
+
+class GoogleGenAIClient:
+    """generateContent client backed by the official google-genai SDK."""
+
+    client_key = "google_gemini_generate_content"
+
+    def __init__(self, *, timeout_seconds: float = 300.0) -> None:
+        self._timeout_seconds = timeout_seconds
+
+    async def invoke(
+        self,
+        config: ModelConfigRecord,
+        api_key: str,
+        request: ModelInvocationRequest,
+    ) -> dict[str, Any]:
+        tool_name_map = build_tool_name_map(request.tools, allow_dash=False)
+        contents = self._build_contents(request, tool_name_map)
+        generate_config = self._build_generate_config(config, request, tool_name_map)
+        try:
+            client = self._make_client(config, api_key)
+            response = await client.aio.models.generate_content(
+                model=config.model_id,
+                contents=contents,
+                config=generate_config,
+            )
+        except genai_errors.APIError as exc:
+            raise self._wrap_api_error(exc) from exc
+        parsed = self._parse_response(response)
+        parsed["tool_calls"] = remap_tool_calls(parsed["tool_calls"], tool_name_map)
+        return parsed
+
+    async def stream(
+        self,
+        config: ModelConfigRecord,
+        api_key: str,
+        request: ModelInvocationRequest,
+        on_text_delta: TextDeltaHandler,
+    ) -> dict[str, Any]:
+        tool_name_map = build_tool_name_map(request.tools, allow_dash=False)
+        contents = self._build_contents(request, tool_name_map)
+        generate_config = self._build_generate_config(config, request, tool_name_map)
+
+        response_id = ""
+        finish_reason: str | None = None
+        usage: dict[str, Any] = {}
+        text_parts: list[str] = []
+        tool_call_buffers: dict[int, dict[str, Any]] = {}
+
+        try:
+            client = self._make_client(config, api_key)
+            stream = await client.aio.models.generate_content_stream(
+                model=config.model_id,
+                contents=contents,
+                config=generate_config,
+            )
+            async for chunk in stream:
+                chunk_usage = self._extract_usage(chunk)
+                if chunk_usage:
+                    usage = chunk_usage
+                chunk_response_id = getattr(chunk, "response_id", None)
+                if chunk_response_id:
+                    response_id = str(chunk_response_id)
+                candidates = getattr(chunk, "candidates", None) or []
+                if not candidates:
+                    continue
+                first = candidates[0]
+                finish_reason = self._enum_to_str(getattr(first, "finish_reason", None)) or finish_reason
+                content = getattr(first, "content", None)
+                parts = getattr(content, "parts", None) or []
+                for index, part in enumerate(parts):
+                    text = getattr(part, "text", None)
+                    if text:
+                        text_parts.append(str(text))
+                        await on_text_delta(str(text))
+                    function_call = getattr(part, "function_call", None)
+                    if function_call is not None and getattr(function_call, "name", None):
+                        tool_call_buffers[index] = {
+                            "id": f"gemini_call_{index}",
+                            "name": str(function_call.name or ""),
+                            "arguments": dict(getattr(function_call, "args", None) or {}),
+                        }
+        except genai_errors.APIError as exc:
+            raise self._wrap_api_error(exc) from exc
+
+        tool_calls = [
+            ModelToolCall(
+                id=str(item.get("id") or f"gemini_call_{index}"),
+                name=str(item.get("name") or ""),
+                arguments=item.get("arguments") or {},
+            )
+            for index, item in sorted(tool_call_buffers.items(), key=lambda pair: pair[0])
+        ]
+        return {
+            "text": "".join(text_parts).strip(),
+            "tool_calls": remap_tool_calls(tool_calls, tool_name_map),
+            "finish_reason": finish_reason,
+            "stop_reason": finish_reason,
+            "usage": usage,
+            "response_id": response_id,
+            "raw_response": {
+                "mode": "stream",
+                "provider": config.provider,
+                "finish_reason": finish_reason,
+                "usage": usage,
+            },
+        }
+
+    def _make_client(self, config: ModelConfigRecord, api_key: str) -> genai.Client:
+        headers: dict[str, str] = {**config.extra_headers}
+        if config.auth_type == "oauth2":
+            # The SDK still requires api_key for construction; the Bearer token
+            # header takes precedence on Google's side for OAuth-based access.
+            headers["Authorization"] = f"Bearer {api_key}"
+        return genai.Client(
+            api_key=api_key,
+            http_options=genai_types.HttpOptions(
+                base_url=self._normalize_base_url(config.api_base_url),
+                headers=headers or None,
+                timeout=int(self._timeout_seconds * 1000),
+            ),
+        )
+
+    @staticmethod
+    def _normalize_base_url(base_url: str) -> str:
+        # The SDK appends its own /v1beta version path.
+        cleaned = str(base_url or "").rstrip("/")
+        for suffix in ("/v1beta", "/v1"):
+            if cleaned.endswith(suffix):
+                cleaned = cleaned[: -len(suffix)]
+                break
+        return cleaned
+
+    def _wrap_api_error(self, exc: genai_errors.APIError) -> ProviderClientError:
+        body = ""
+        details = getattr(exc, "details", None)
+        if details:
+            try:
+                body = json.dumps(details, ensure_ascii=False)
+            except Exception:
+                body = str(details)
+        return ProviderClientError(
+            str(exc),
+            status_code=getattr(exc, "code", None),
+            response_body=body,
+        )
+
+    def _build_generate_config(
+        self,
+        config: ModelConfigRecord,
+        request: ModelInvocationRequest,
+        tool_name_map: dict[str, str] | None,
+    ) -> dict[str, Any]:
+        generate_config: dict[str, Any] = {
+            "max_output_tokens": config.max_output_tokens,
+        }
+        if request.system_prompt:
+            generate_config["system_instruction"] = request.system_prompt
+        if config.temperature is not None:
+            generate_config["temperature"] = config.temperature
+        if config.supports_tools and request.tools:
+            generate_config["tools"] = [
+                {
+                    "function_declarations": [
+                        {
+                            "name": (tool_name_map or {}).get(item["name"], item["name"]),
+                            "description": item["description"],
+                            "parameters": self._sanitize_function_parameters(item["input_schema"]),
+                        }
+                        for item in request.tools
+                    ]
+                }
+            ]
+        return generate_config
+
+    def _parse_response(self, response: Any) -> dict[str, Any]:
+        candidates = getattr(response, "candidates", None) or []
+        first = candidates[0] if candidates else None
+        content = getattr(first, "content", None)
+        parts = getattr(content, "parts", None) or []
+
+        text_blocks: list[str] = []
+        tool_calls: list[ModelToolCall] = []
+        for index, part in enumerate(parts):
+            text = getattr(part, "text", None)
+            if text:
+                text_blocks.append(str(text))
+            function_call = getattr(part, "function_call", None)
+            if function_call is not None and getattr(function_call, "name", None):
+                tool_calls.append(
+                    ModelToolCall(
+                        id=f"gemini_call_{index}",
+                        name=str(function_call.name or ""),
+                        arguments=dict(getattr(function_call, "args", None) or {}),
+                    )
+                )
+
+        finish_reason = self._enum_to_str(getattr(first, "finish_reason", None))
+        return {
+            "text": "\n".join(block.strip() for block in text_blocks if block.strip()).strip(),
+            "tool_calls": tool_calls,
+            "finish_reason": finish_reason,
+            "stop_reason": finish_reason,
+            "usage": self._extract_usage(response),
+            "response_id": getattr(response, "response_id", None),
+            "raw_response": response_to_dict(response),
+        }
+
+    def _extract_usage(self, response: Any) -> dict[str, Any]:
+        """Keep the legacy camelCase usage keys so token accounting stays intact."""
+        usage_metadata = getattr(response, "usage_metadata", None)
+        if usage_metadata is None:
+            return {}
+        usage: dict[str, Any] = {}
+        for attr, key in (
+            ("prompt_token_count", "promptTokenCount"),
+            ("candidates_token_count", "candidatesTokenCount"),
+            ("total_token_count", "totalTokenCount"),
+            ("cached_content_token_count", "cachedContentTokenCount"),
+            ("thoughts_token_count", "thoughtsTokenCount"),
+        ):
+            value = getattr(usage_metadata, attr, None)
+            if value is not None:
+                usage[key] = int(value)
+        return usage
+
+    @staticmethod
+    def _enum_to_str(value: Any) -> str | None:
+        if value is None:
+            return None
+        return str(getattr(value, "value", None) or getattr(value, "name", None) or value)
+
+    def _build_contents(
+        self,
+        request: ModelInvocationRequest,
+        tool_name_map: dict[str, str] | None = None,
+    ) -> list[dict[str, Any]]:
+        contents: list[dict[str, Any]] = []
+        for message in request.structured_messages:
+            if message.role == "system":
+                continue
+            role = "model" if message.role == "assistant" else "user"
+            parts = self._serialize_parts(message)
+            if message.role == "assistant" and message.tool_calls:
+                for tool_call in message.tool_calls:
+                    parts.append(
+                        {
+                            "function_call": {
+                                "name": (tool_name_map or {}).get(tool_call.name, tool_call.name),
+                                "args": tool_call.arguments or {},
+                            }
+                        }
+                    )
+            contents.append({"role": role, "parts": parts})
+        return contents
+
+    def _serialize_parts(self, message: UnifiedMessage) -> list[dict[str, Any]]:
+        parts: list[dict[str, Any]] = []
+        for part in message.parts:
+            serialized = self._serialize_part(part)
+            if serialized is not None:
+                parts.append(serialized)
+        return parts or [{"text": ""}]
+
+    def _serialize_part(self, part: ContentPart) -> dict[str, Any] | None:
+        if part.type == "text":
+            return {"text": part.text or ""}
+        if part.type == "image_base64" and part.data_base64:
+            return {
+                "inline_data": {
+                    "mime_type": part.mime_type or "image/jpeg",
+                    "data": part.data_base64,
+                }
+            }
+        if part.type == "image_url" and part.url:
+            if part.url.startswith("data:") and ";base64," in part.url:
+                prefix, data_base64 = part.url.split(";base64,", 1)
+                mime_type = prefix.split("data:", 1)[-1] or "image/jpeg"
+                return {
+                    "inline_data": {
+                        "mime_type": mime_type,
+                        "data": data_base64,
+                    }
+                }
+            return {"text": f"Image URL: {part.url}"}
+        if part.type == "tool_result":
+            payload = part.payload if isinstance(part.payload, dict) else {}
+            return {
+                "function_response": {
+                    "name": part.tool_name or "tool_result",
+                    "response": payload or {"content": part.text or ""},
+                }
+            }
+        if part.type == "file":
+            label = part.file_name or "file"
+            return {"text": f"[file:{label}]"}
+        return None
+
+    def _sanitize_function_parameters(self, schema: Any) -> dict[str, Any]:
+        if not isinstance(schema, dict):
+            return {"type": "object", "properties": {}}
+
+        working = dict(schema)
+        for union_key in ("anyOf", "oneOf", "allOf"):
+            if union_key in working and "type" not in working:
+                candidate = self._first_supported_union_member(working.get(union_key))
+                if candidate:
+                    working = {**candidate, **{key: value for key, value in working.items() if key != union_key}}
+                else:
+                    working.pop(union_key, None)
+
+        sanitized: dict[str, Any] = {}
+        for key, value in working.items():
+            if key not in _SCHEMA_ALLOWED_KEYS:
+                continue
+            if key == "properties" and isinstance(value, dict):
+                sanitized["properties"] = {
+                    str(name): self._sanitize_function_parameters(child_schema)
+                    for name, child_schema in value.items()
+                    if isinstance(name, str)
+                }
+                continue
+            if key == "items":
+                sanitized["items"] = self._sanitize_function_parameters(value)
+                continue
+            if key == "required" and isinstance(value, list):
+                known = set((sanitized.get("properties") or {}).keys()) if isinstance(sanitized.get("properties"), dict) else None
+                required = [str(item) for item in value if isinstance(item, str)]
+                sanitized["required"] = [item for item in required if known is None or item in known]
+                continue
+            if key == "type":
+                if isinstance(value, list):
+                    preferred = next((item for item in value if isinstance(item, str) and item != "null"), None)
+                    if preferred:
+                        sanitized["type"] = preferred
+                elif isinstance(value, str):
+                    sanitized["type"] = value
+                continue
+            sanitized[key] = value
+
+        if sanitized.get("type") == "object":
+            sanitized.setdefault("properties", {})
+        return sanitized or {"type": "object", "properties": {}}
+
+    def _first_supported_union_member(self, value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, list):
+            return None
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type == "null":
+                continue
+            if isinstance(item_type, list) and all(part == "null" for part in item_type):
+                continue
+            return item
+        return None

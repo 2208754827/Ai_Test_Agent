@@ -7,9 +7,7 @@ from collections import OrderedDict
 from dataclasses import dataclass
 from time import perf_counter
 
-import httpx
-
-from src.application.embedding_adapters.registry import EmbeddingAdapterRegistry
+from src.application.model_clients.embeddings import resolve_embedding_client
 from src.application.models.oauth_token_service import OAuthTokenService
 from src.core.config import Settings
 from src.infrastructure.model_config_store import MySQLModelConfigStore
@@ -33,13 +31,11 @@ class EmbeddingRuntimeService:
         *,
         model_config_store: MySQLModelConfigStore,
         settings: Settings,
-        adapter_registry: EmbeddingAdapterRegistry | None = None,
         oauth_token_service: OAuthTokenService | None = None,
         cache_size: int = 512,
     ) -> None:
         self._model_config_store = model_config_store
         self._settings = settings
-        self._adapter_registry = adapter_registry or EmbeddingAdapterRegistry()
         self._oauth_token_service = oauth_token_service
         self._cache_size = max(int(cache_size), 0)
         self._cache: OrderedDict[tuple[str, str], list[float]] = OrderedDict()
@@ -59,7 +55,10 @@ class EmbeddingRuntimeService:
             self._model_config_store.get_for_application,
             "embedding_retrieval",
         )
-        adapter = self._adapter_registry.resolve(resolved_config)
+        client = resolve_embedding_client(
+            resolved_config,
+            timeout_seconds=self._settings.llm_request_timeout_seconds,
+        )
         cache_namespace = "|".join(
             (
                 resolved_config.provider,
@@ -81,17 +80,7 @@ class EmbeddingRuntimeService:
         if missing_indexes:
             api_key = await self._resolve_api_key(resolved_config)
             missing_texts = [prepared[index] for index in missing_indexes]
-            request = adapter.build_request(resolved_config, api_key, missing_texts)
-            async with httpx.AsyncClient(
-                timeout=self._settings.llm_request_timeout_seconds
-            ) as client:
-                response = await client.post(
-                    request.url,
-                    headers=request.headers,
-                    json=request.payload,
-                )
-                response.raise_for_status()
-            raw_vectors = adapter.parse_response(response.json())
+            raw_vectors = await client.embed(resolved_config, api_key, missing_texts)
             if len(raw_vectors) != len(missing_indexes):
                 raise ValueError(
                     "Embedding provider returned a different number of vectors than inputs."
@@ -115,7 +104,7 @@ class EmbeddingRuntimeService:
             vectors=vectors,
             model_name=resolved_config.name,
             provider=resolved_config.provider,
-            adapter=adapter.key,
+            adapter=client.key,
             original_dimension=original_dimension or len(vectors[0]),
             stored_dimension=self._settings.postgres_vector_dimension,
             latency_ms=int((perf_counter() - started_at) * 1000),

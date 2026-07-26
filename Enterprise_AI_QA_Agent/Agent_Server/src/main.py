@@ -27,7 +27,6 @@ from src.api.routes.sessions import router as sessions_router
 from src.api.routes.settings import router as settings_router
 from src.api.routes.task_pool import router as task_pool_router
 from src.api.routes.mail import router as mail_router
-from src.application.model_adapters import build_default_adapter_registry
 from src.application.mail.auth_monitor import TencentAuthMonitor
 from src.application.models.oauth_token_service import OAuthTokenService
 from src.application.artifacts.artifact_storage_service import ArtifactStorageService
@@ -187,11 +186,9 @@ async def lifespan(app: FastAPI):
     observation_runtime_service = ObservationRuntimeService()
     transcript_hygiene_service = TranscriptHygieneService()
     runtime_control = RuntimeControlRegistry()
-    adapter_registry = build_default_adapter_registry()
     model_runtime_service = ModelRuntimeService(
         model_registry=model_registry,
         settings=settings,
-        adapter_registry=adapter_registry,
         oauth_token_service=oauth_token_service,
     )
     tool_runtime_service = ToolRuntimeService(
@@ -288,7 +285,6 @@ async def lifespan(app: FastAPI):
     app.state.runtime_control = runtime_control
     app.state.graph = graph
     app.state.model_runtime_service = model_runtime_service
-    app.state.model_adapter_registry = adapter_registry
     app.state.tool_runtime_service = tool_runtime_service
     app.state.mail_service = tool_runtime_service._mail_service
     app.state.docker_management_service = DockerManagementService(settings)
@@ -337,7 +333,6 @@ async def lifespan(app: FastAPI):
         model_config_store=model_config_store,
         email_config_store=email_config_store,
         channel_config_store=channel_config_store,
-        adapter_registry=adapter_registry,
         oauth_token_service=oauth_token_service,
         embedding_runtime_service=embedding_runtime_service,
     )

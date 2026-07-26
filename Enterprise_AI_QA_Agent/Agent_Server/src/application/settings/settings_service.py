@@ -9,8 +9,7 @@ from time import perf_counter
 import httpx
 
 from src.application.context.embedding_runtime_service import EmbeddingRuntimeService
-from src.application.model_adapters import AdapterRegistry, build_default_adapter_registry
-from src.application.models.model_compatibility import ModelCompatibilityLayer
+from src.application.model_clients import resolve_client
 from src.application.models.oauth_token_service import OAuthTokenService
 from src.application.settings.channel_gateway_policy import ChannelGatewayPolicyService
 from src.core.config import Settings
@@ -55,7 +54,6 @@ class SettingsService:
         model_config_store: MySQLModelConfigStore,
         email_config_store: MySQLEmailConfigStore,
         channel_config_store: MySQLChannelConfigStore,
-        adapter_registry: AdapterRegistry | None = None,
         oauth_token_service: OAuthTokenService | None = None,
         embedding_runtime_service: EmbeddingRuntimeService | None = None,
     ) -> None:
@@ -63,8 +61,6 @@ class SettingsService:
         self._model_config_store = model_config_store
         self._email_config_store = email_config_store
         self._channel_config_store = channel_config_store
-        self._adapter_registry = adapter_registry or build_default_adapter_registry()
-        self._compatibility = ModelCompatibilityLayer(adapter_registry=self._adapter_registry)
         self._oauth_token_service = oauth_token_service or OAuthTokenService(
             settings=settings,
             request_timeout=settings.llm_request_timeout_seconds,
@@ -133,7 +129,7 @@ class SettingsService:
                 api_base_url=record.api_base_url,
             )
         else:
-            task_result = self._test_api_key_connection(
+            task_result = await self._test_api_key_connection(
                 record,
                 public_item,
                 record.api_key,
@@ -181,21 +177,19 @@ class SettingsService:
             ),
         )
 
-    def _test_api_key_connection(self, record, public_item, api_key: str):
+    async def _test_api_key_connection(self, record, public_item, api_key: str):
         request = ModelInvocationRequest(
             system_prompt="You are a model connection health check. Reply with a short pong.",
             messages=[{"role": "user", "content": "ping"}],
         )
-        url = self._compatibility.build_url(record)
-        headers = self._compatibility.build_headers(record, api_key)
-        payload = self._compatibility.build_request(record, request)
+        client = resolve_client(
+            record,
+            timeout_seconds=self._settings.llm_request_timeout_seconds,
+        )
         started_at = perf_counter()
         try:
-            with httpx.Client(timeout=self._settings.llm_request_timeout_seconds) as client:
-                response = client.post(url, headers=headers, json=payload)
-                response.raise_for_status()
-                parsed = self._compatibility.parse_response(record, response.json())
-        except httpx.HTTPError as exc:
+            parsed = await client.invoke(record, api_key, request)
+        except Exception as exc:
             return ModelConfigConnectionTestResponse(
                 ok=False,
                 message=f"Connection test failed: {exc}",
@@ -242,7 +236,7 @@ class SettingsService:
                 api_base_url=record.api_base_url,
                 latency_ms=int((perf_counter() - started_at) * 1000),
             )
-        return self._test_api_key_connection(record, public_item, access_token)
+        return await self._test_api_key_connection(record, public_item, access_token)
 
     # Agent-native mailbox settings -----------------------------------------
 

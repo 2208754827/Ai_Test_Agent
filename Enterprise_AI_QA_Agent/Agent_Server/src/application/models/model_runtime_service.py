@@ -6,11 +6,11 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any, Awaitable, Callable
 
-import httpx
-
-from src.application.model_adapters import AdapterRegistry, build_default_adapter_registry
-from src.application.model_adapters.base import ProviderAdapter
-from src.application.models.model_compatibility import ModelCompatibilityLayer
+from src.application.model_clients import ProviderClient, ProviderClientError, resolve_client
+from src.application.model_clients.provider_profiles import (
+    normalize_transport,
+    resolve_provider_profile,
+)
 from src.application.models.oauth_token_service import OAuthTokenService
 from src.core.config import Settings
 from src.registry.models import ModelRegistry
@@ -37,13 +37,10 @@ class ModelRuntimeService:
         self,
         model_registry: ModelRegistry,
         settings: Settings,
-        adapter_registry: AdapterRegistry | None = None,
         oauth_token_service: OAuthTokenService | None = None,
     ) -> None:
         self._model_registry = model_registry
         self._settings = settings
-        self._adapter_registry = adapter_registry or build_default_adapter_registry()
-        self._compatibility = ModelCompatibilityLayer(adapter_registry=self._adapter_registry)
         self._oauth_token_service = oauth_token_service
 
     def get_default_model_config(self) -> ModelConfigRecord | None:
@@ -95,8 +92,11 @@ class ModelRuntimeService:
                 raw_response={"mode": "missing_api_key", "model_key": config.key},
             )
 
-        adapter = self._adapter_registry.resolve(config)
-        return await self._invoke_with_adapter(adapter, config, api_key, request)
+        client = resolve_client(
+            config,
+            timeout_seconds=self._settings.llm_request_timeout_seconds,
+        )
+        return await self._invoke_with_client(client, config, api_key, request)
 
     async def _resolve_auth_token(self, config: ModelConfigRecord) -> str | None:
         """Return the bearer token to use for this model config.
@@ -129,45 +129,29 @@ class ModelRuntimeService:
         finally:
             _stream_handler_var.reset(token)
 
-    async def _invoke_with_adapter(
+    async def _invoke_with_client(
         self,
-        adapter: ProviderAdapter,
+        client: ProviderClient,
         config: ModelConfigRecord,
         api_key: str,
         request: ModelInvocationRequest,
     ) -> ModelInvocationResult:
-        descriptor = adapter.describe(config)
-        url = adapter.build_url(config)
-        headers = adapter.build_headers(config, api_key)
         request = self._sanitize_request_for_provider(config, request)
         effective_request = request
-        tool_name_map = adapter.build_tool_name_map(request.tools)
-        payload = adapter.build_request(config, request, tool_name_map=tool_name_map)
         tool_fallback_used = False
 
         try:
-            parsed = await self._send_with_adapter(adapter, config, url, headers, payload)
-        except httpx.HTTPError as exc:
+            parsed = await self._send_with_client(client, config, api_key, request)
+        except ProviderClientError as exc:
             if self._should_retry_google_without_tools(config, request, exc):
                 effective_request = self._build_google_tool_free_request(request)
-                tool_name_map = adapter.build_tool_name_map(effective_request.tools)
-                payload = adapter.build_request(
-                    config,
-                    effective_request,
-                    tool_name_map=tool_name_map,
-                )
                 tool_fallback_used = True
                 try:
-                    parsed = await self._send_with_adapter(adapter, config, url, headers, payload)
-                except httpx.HTTPError as retry_exc:
+                    parsed = await self._send_with_client(client, config, api_key, effective_request)
+                except ProviderClientError as retry_exc:
                     return self._http_error_result(config, request, retry_exc)
             else:
                 return self._http_error_result(config, request, exc)
-
-        parsed["tool_calls"] = adapter.remap_tool_calls(
-            parsed["tool_calls"],
-            tool_name_map,
-        )
 
         request_payload = self._summarize_request(config, effective_request)
         if tool_fallback_used:
@@ -181,8 +165,8 @@ class ModelRuntimeService:
             response_summary={
                 "mode": "ok",
                 "provider": config.provider,
-                "provider_profile": descriptor.name,
-                "transport": descriptor.protocol,
+                "provider_profile": self._provider_profile_name(config),
+                "transport": self._resolved_transport(config),
                 "response_id": parsed["response_id"],
                 "finish_reason": parsed["finish_reason"],
                 "stop_reason": parsed["stop_reason"],
@@ -195,32 +179,32 @@ class ModelRuntimeService:
             raw_response=parsed["raw_response"],
         )
 
-    async def _send_with_adapter(
+    async def _send_with_client(
         self,
-        adapter: ProviderAdapter,
+        client: ProviderClient,
         config: ModelConfigRecord,
-        url: str,
-        headers: dict[str, str],
-        payload: dict[str, Any],
+        api_key: str,
+        request: ModelInvocationRequest,
     ) -> dict[str, Any]:
         if _stream_handler_var.get() is not None:
-            return await self._stream_with_adapter(adapter, config, url, headers, payload)
+            return await client.stream(config, api_key, request, self._emit_stream_chunk)
+        return await client.invoke(config, api_key, request)
 
-        async with httpx.AsyncClient(timeout=self._settings.llm_request_timeout_seconds) as client:
-            response = await client.post(url, headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
-        return adapter.parse_response(config, data)
+    def _provider_profile_name(self, config: ModelConfigRecord) -> str:
+        return resolve_provider_profile(config.provider).provider
+
+    def _resolved_transport(self, config: ModelConfigRecord) -> str:
+        return normalize_transport(config.transport, provider=config.provider)
 
     def _should_retry_google_without_tools(
         self,
         config: ModelConfigRecord,
         request: ModelInvocationRequest,
-        exc: httpx.HTTPError,
+        exc: ProviderClientError,
     ) -> bool:
         if config.transport != "google_gemini_generate_content" or not request.tools:
             return False
-        return isinstance(exc, httpx.HTTPStatusError) and exc.response is not None and exc.response.status_code == 400
+        return exc.status_code == 400
 
     def _build_google_tool_free_request(
         self,
@@ -448,16 +432,10 @@ class ModelRuntimeService:
         self,
         config: ModelConfigRecord,
         request: ModelInvocationRequest,
-        exc: httpx.HTTPError,
+        exc: ProviderClientError,
     ) -> ModelInvocationResult:
-        response_body = ""
-        status_code = None
-        if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
-            status_code = exc.response.status_code
-            try:
-                response_body = truncate_text(exc.response.text or "", 400)
-            except Exception:
-                response_body = ""
+        response_body = truncate_text(exc.response_body or "", 400)
+        status_code = exc.status_code
         return ModelInvocationResult(
             text=(
                 f"Model invocation failed for '{config.name}' via provider '{config.provider}': "
@@ -468,8 +446,8 @@ class ModelRuntimeService:
             response_summary={
                 "mode": "http_error",
                 "provider": config.provider,
-                "provider_profile": self._compatibility.resolve_profile(config).name,
-                "transport": self._compatibility.resolve_profile(config).protocol,
+                "provider_profile": self._provider_profile_name(config),
+                "transport": self._resolved_transport(config),
                 "error_type": exc.__class__.__name__,
                 "status_code": status_code,
                 "error": truncate_text(str(exc), 180),
@@ -492,8 +470,8 @@ class ModelRuntimeService:
             "model_key": config.key,
             "model_id": config.model_id,
             "provider": config.provider,
-            "provider_profile": self._compatibility.resolve_profile(config).name,
-            "transport": self._compatibility.resolve_profile(config).protocol,
+            "provider_profile": self._provider_profile_name(config),
+            "transport": self._resolved_transport(config),
             "api_base_url": config.api_base_url,
             "max_tokens": config.max_tokens,
             "temperature": config.temperature,
@@ -512,36 +490,3 @@ class ModelRuntimeService:
         if handler is None or not chunk:
             return
         await handler(chunk)
-
-    async def _stream_with_adapter(
-        self,
-        adapter,
-        config: ModelConfigRecord,
-        url: str,
-        headers: dict[str, str],
-        payload: dict[str, Any],
-    ) -> dict[str, Any]:
-        descriptor = adapter.describe(config)
-        stream_payload = {**payload, "stream": True}
-        if descriptor.protocol == "openai_chat_completions":
-            stream_payload["stream_options"] = {"include_usage": True}
-        state = adapter.create_stream_state()
-
-        async with httpx.AsyncClient(timeout=self._settings.llm_request_timeout_seconds) as client:
-            async with client.stream("POST", url, headers=headers, json=stream_payload) as response:
-                response.raise_for_status()
-                async for raw_line in response.aiter_lines():
-                    line = raw_line.strip()
-                    if descriptor.protocol == "anthropic_messages":
-                        if not line or line.startswith(":") or not line.startswith("data:"):
-                            continue
-                    elif not line or not line.startswith("data:"):
-                        continue
-                    data_chunk = line[5:].strip()
-                    parsed = adapter.parse_stream_chunk(config, state, data_chunk)
-                    if parsed.text_delta:
-                        await self._emit_stream_chunk(parsed.text_delta)
-                    if parsed.should_stop:
-                        break
-
-        return adapter.finalize_stream(config, state)
