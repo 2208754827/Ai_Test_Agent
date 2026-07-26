@@ -27,6 +27,12 @@ MODE_MANIFEST = {
         "report-writer",
     ],
     "harness_key": "api_testing_harness",
+    "activation_policy": "auto",
+    "maximum_auto_risk_level": "medium",
+    "core_capability_keys": ["api.validation", "api.documentation.read"],
+    "on_demand_capability_keys": ["performance.load_test", "security.assessment", "report.generate"],
+    "public_entry_tool_key": "api-test-runner",
+    "allowed_subworkflow_keys": ["performance_testing", "security_testing"],
     "placeholder": False,
     "tags": ["testing", "api", "contract"],
 }

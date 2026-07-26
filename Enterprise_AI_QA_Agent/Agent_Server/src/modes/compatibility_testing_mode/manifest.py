@@ -31,6 +31,11 @@ MODE_MANIFEST = {
         "session-history",
     ],
     "harness_key": "compatibility_testing_harness",
+    "activation_policy": "confirm",
+    "core_capability_keys": ["compatibility.matrix_test"],
+    "on_demand_capability_keys": ["api.documentation.read", "performance.load_test", "ui.automation", "smoke.validation"],
+    "public_entry_tool_key": "compatibility-test-runner",
+    "allowed_subworkflow_keys": ["api_testing", "performance_testing", "ui_automation", "smoke_testing"],
     "placeholder": False,
     "tags": ["testing", "compatibility", "matrix", "runner", "orchestration"],
 }

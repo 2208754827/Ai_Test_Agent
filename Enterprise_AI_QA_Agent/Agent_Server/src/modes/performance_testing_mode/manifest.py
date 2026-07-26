@@ -42,6 +42,11 @@ MODE_MANIFEST = {
         "session-history",
     ],
     "harness_key": "performance_testing_harness",
+    "activation_policy": "confirm",
+    "blocked_environments": ["production"],
+    "core_capability_keys": ["performance.load_test"],
+    "on_demand_capability_keys": ["api.documentation.read", "api.documentation.write", "report.generate"],
+    "public_entry_tool_key": "performance-test-runner",
     "placeholder": False,
     "tags": ["testing", "performance", "k6", "jmeter", "load"],
 }

@@ -12,6 +12,8 @@ from src.application.context.context_compaction_service import ContextCompaction
 from src.application.context.transcript_hygiene_service import TranscriptHygieneService
 from src.application.resources.session_resource_service import SessionResourceService
 from src.application.runtime.tool_runtime_service import ToolExecutionContext, ToolRuntimeService
+from src.application.security.approval_scope_service import ApprovalScopeService
+from src.application.security.execution_safety_policy import ExecutionSafetyPolicy
 from src.domain.models import SessionRecord
 from src.infrastructure.storage_utils import make_json_safe
 from src.registry.tools import ToolRegistry
@@ -142,7 +144,23 @@ class RuntimeService:
             selected_model_key=str(state["selected_model_key"]),
         )
 
-        if approval["status"] == "approved":
+        tool = self._tool_registry.get(approval["tool_key"])
+        stored_scope_hash = str(approval.get("metadata", {}).get("approval_scope_hash") or "")
+        scope_matches = bool(stored_scope_hash) and ApprovalScopeService().matches(
+            stored_scope_hash,
+            mode_key=str(state.get("mode_key") or "default"),
+            tool_key=tool.key,
+            arguments=tool_call.arguments,
+            context=state.get("context_bundle") or {},
+        )
+        execution_safety = ExecutionSafetyPolicy().evaluate_tool_call(
+            tool=tool,
+            arguments=tool_call.arguments,
+            active_mode_key=str(state.get("mode_key") or "default"),
+            context=state.get("context_bundle") or {},
+        )
+
+        if approval["status"] == "approved" and scope_matches and execution_safety.behavior != "deny":
             append_graph_event(
                 state,
                 "tool.execution_started",
@@ -152,7 +170,7 @@ class RuntimeService:
                 approval_id=approval["id"],
             )
             execution_record = await self._tool_runtime_service.execute(
-                tool=self._tool_registry.get(approval["tool_key"]),
+                tool=tool,
                 call=tool_call,
                 context=context,
             )
@@ -166,14 +184,26 @@ class RuntimeService:
                 status=execution_record.status,
             )
         else:
+            if approval["status"] == "approved" and not scope_matches:
+                denial_summary = f"Approval scope changed before tool '{approval['tool_name']}' could execute."
+                denial_output = {"error": "approval_scope_mismatch"}
+            elif approval["status"] == "approved" and execution_safety.behavior == "deny":
+                denial_summary = execution_safety.reason
+                denial_output = {
+                    "error": "execution_safety_denied",
+                    "reason_code": execution_safety.reason_code,
+                }
+            else:
+                denial_summary = f"Approval denied for tool '{approval['tool_name']}'."
+                denial_output = {"decision_note": approval.get("decision_note")}
             execution_record = ToolExecutionRecord(
                 call_id=tool_call.id,
                 tool_key=approval["tool_key"],
                 tool_name=approval["tool_name"],
                 status="denied",
-                summary=f"Approval denied for tool '{approval['tool_name']}'.",
+                summary=denial_summary,
                 input=tool_call.arguments,
-                output={"decision_note": approval.get("decision_note")},
+                output=denial_output,
                 approval_id=approval["id"],
             )
             append_graph_event(
@@ -400,7 +430,13 @@ class RuntimeService:
         }
 
     def _should_use_dedicated_security_runtime(self, request: ExecutionRequest) -> bool:
-        return str(request.mode_key or "").strip() == "security_testing"
+        safety = request.context.get("safety_assessment")
+        return (
+            str(request.mode_key or "").strip() == "security_testing"
+            and bool(request.context.get("trusted_security_runtime_direct_execution"))
+            and isinstance(safety, dict)
+            and safety.get("authorization_status") == "verified"
+        )
 
     async def _execute_security_mode_turn(
         self,
@@ -892,9 +928,11 @@ class RuntimeService:
             "content": json.dumps(
                 make_json_safe(
                     {
-                    "status": record.status,
-                    "summary": record.summary,
-                    "output": record.output,
+                        "status": record.status,
+                        "summary": record.summary,
+                        "output": record.output,
+                        "content_provenance": "tool_output",
+                        "instruction_authority": "none",
                     }
                 ),
                 ensure_ascii=False,

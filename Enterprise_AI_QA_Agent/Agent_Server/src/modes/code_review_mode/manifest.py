@@ -36,6 +36,10 @@ MODE_MANIFEST = {
         "subagent-dispatch",
     ],
     "harness_key": "code_review_debate_harness",
+    "activation_policy": "auto",
+    "core_capability_keys": ["code.review"],
+    "on_demand_capability_keys": ["report.generate"],
+    "public_entry_tool_key": "code-review-orchestrator",
     "placeholder": False,
     "tags": ["testing", "code-review", "approval"],
 }

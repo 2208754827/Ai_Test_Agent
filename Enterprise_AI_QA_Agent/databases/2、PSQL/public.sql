@@ -12,7 +12,7 @@
  Target Server Version : 150002 (150002)
  File Encoding         : 65001
 
- Date: 05/06/2026 17:18:51
+ Date: 26/07/2026 21:07:45
 */
 
 
@@ -76,6 +76,26 @@ CREATE TABLE "public"."agent_memories" (
 ;
 
 -- ----------------------------
+-- Table structure for agent_perf_runs
+-- ----------------------------
+DROP TABLE IF EXISTS "public"."agent_perf_runs";
+CREATE TABLE "public"."agent_perf_runs" (
+  "run_id" text COLLATE "pg_catalog"."default" NOT NULL,
+  "plan_id" text COLLATE "pg_catalog"."default" NOT NULL,
+  "engine" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT 'k6'::text,
+  "backend" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT 'docker'::text,
+  "status" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT 'pending'::text,
+  "run_intent" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT 'probe'::text,
+  "target_url" text COLLATE "pg_catalog"."default",
+  "metrics_json" jsonb,
+  "verdict" text COLLATE "pg_catalog"."default",
+  "started_at" timestamptz(6),
+  "completed_at" timestamptz(6),
+  "created_at" timestamptz(6) DEFAULT now()
+)
+;
+
+-- ----------------------------
 -- Table structure for agent_session_approvals
 -- ----------------------------
 DROP TABLE IF EXISTS "public"."agent_session_approvals";
@@ -121,6 +141,24 @@ CREATE TABLE "public"."agent_session_messages" (
 ;
 
 -- ----------------------------
+-- Table structure for agent_session_resources
+-- ----------------------------
+DROP TABLE IF EXISTS "public"."agent_session_resources";
+CREATE TABLE "public"."agent_session_resources" (
+  "id" text COLLATE "pg_catalog"."default" NOT NULL,
+  "session_id" text COLLATE "pg_catalog"."default" NOT NULL,
+  "kind" text COLLATE "pg_catalog"."default" NOT NULL,
+  "resource_key" text COLLATE "pg_catalog"."default" NOT NULL,
+  "status" text COLLATE "pg_catalog"."default" NOT NULL,
+  "cleanup_policy" text COLLATE "pg_catalog"."default" NOT NULL,
+  "created_at" timestamptz(6) NOT NULL,
+  "updated_at" timestamptz(6) NOT NULL,
+  "released_at" timestamptz(6),
+  "metadata" jsonb NOT NULL DEFAULT '{}'::jsonb
+)
+;
+
+-- ----------------------------
 -- Table structure for agent_session_snapshots
 -- ----------------------------
 DROP TABLE IF EXISTS "public"."agent_session_snapshots";
@@ -152,6 +190,101 @@ CREATE TABLE "public"."agent_sessions" (
   "metadata" jsonb NOT NULL DEFAULT '{}'::jsonb,
   "event_count" int4 NOT NULL DEFAULT 0,
   "snapshot_count" int4 NOT NULL DEFAULT 0
+)
+;
+
+-- ----------------------------
+-- Table structure for agent_smoke_plan_catalog
+-- ----------------------------
+DROP TABLE IF EXISTS "public"."agent_smoke_plan_catalog";
+CREATE TABLE "public"."agent_smoke_plan_catalog" (
+  "plan_id" text COLLATE "pg_catalog"."default" NOT NULL,
+  "project_scope" text COLLATE "pg_catalog"."default" NOT NULL,
+  "target_url" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "title" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "status" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "current_version" int4 NOT NULL DEFAULT 1,
+  "approved_version" int4,
+  "selected_case_count" int4 NOT NULL DEFAULT 0,
+  "total_case_count" int4 NOT NULL DEFAULT 0,
+  "last_run_status" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "last_run_at" timestamptz(6),
+  "plan_uri" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "approved_plan_uri" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "run_result_uri" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "report_uri" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "created_by_session_id" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "metadata" jsonb NOT NULL DEFAULT '{}'::jsonb,
+  "created_at" timestamptz(6) NOT NULL,
+  "updated_at" timestamptz(6) NOT NULL
+)
+;
+
+-- ----------------------------
+-- Table structure for agent_smoke_plan_versions
+-- ----------------------------
+DROP TABLE IF EXISTS "public"."agent_smoke_plan_versions";
+CREATE TABLE "public"."agent_smoke_plan_versions" (
+  "id" text COLLATE "pg_catalog"."default" NOT NULL,
+  "plan_id" text COLLATE "pg_catalog"."default" NOT NULL,
+  "version" int4 NOT NULL,
+  "revision_reason" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "user_revision" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "plan_uri" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "plan_md_uri" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "case_count" int4 NOT NULL DEFAULT 0,
+  "selected_case_count" int4 NOT NULL DEFAULT 0,
+  "risk_summary" jsonb NOT NULL DEFAULT '{}'::jsonb,
+  "created_at" timestamptz(6) NOT NULL
+)
+;
+
+-- ----------------------------
+-- Table structure for agent_smoke_regression_candidates
+-- ----------------------------
+DROP TABLE IF EXISTS "public"."agent_smoke_regression_candidates";
+CREATE TABLE "public"."agent_smoke_regression_candidates" (
+  "case_id" text COLLATE "pg_catalog"."default" NOT NULL,
+  "source_plan_id" text COLLATE "pg_catalog"."default" NOT NULL,
+  "source_run_id" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "project_scope" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "case_type" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "title" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "case_uri" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "stability_score" float8 NOT NULL DEFAULT 0,
+  "status" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "run_count" int4 NOT NULL DEFAULT 0,
+  "pass_count" int4 NOT NULL DEFAULT 0,
+  "fail_count" int4 NOT NULL DEFAULT 0,
+  "flaky_count" int4 NOT NULL DEFAULT 0,
+  "blocked_count" int4 NOT NULL DEFAULT 0,
+  "last_status" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "last_passed_at" timestamptz(6),
+  "updated_at" timestamptz(6) NOT NULL
+)
+;
+
+-- ----------------------------
+-- Table structure for agent_smoke_run_history
+-- ----------------------------
+DROP TABLE IF EXISTS "public"."agent_smoke_run_history";
+CREATE TABLE "public"."agent_smoke_run_history" (
+  "run_id" text COLLATE "pg_catalog"."default" NOT NULL,
+  "plan_id" text COLLATE "pg_catalog"."default" NOT NULL,
+  "plan_version" int4 NOT NULL,
+  "project_scope" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "status" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "verdict" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "total_cases" int4 NOT NULL DEFAULT 0,
+  "passed_cases" int4 NOT NULL DEFAULT 0,
+  "failed_cases" int4 NOT NULL DEFAULT 0,
+  "blocked_cases" int4 NOT NULL DEFAULT 0,
+  "started_at" timestamptz(6) NOT NULL,
+  "completed_at" timestamptz(6),
+  "run_result_uri" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "report_uri" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "evidence_manifest_uri" text COLLATE "pg_catalog"."default" NOT NULL DEFAULT ''::text,
+  "metadata" jsonb NOT NULL DEFAULT '{}'::jsonb
 )
 ;
 
@@ -569,6 +702,21 @@ CREATE INDEX "idx_agent_memories_tags" ON "public"."agent_memories" USING gin (
 ALTER TABLE "public"."agent_memories" ADD CONSTRAINT "agent_memories_pkey" PRIMARY KEY ("id");
 
 -- ----------------------------
+-- Indexes structure for table agent_perf_runs
+-- ----------------------------
+CREATE INDEX "idx_agent_perf_runs_plan_id" ON "public"."agent_perf_runs" USING btree (
+  "plan_id" COLLATE "pg_catalog"."default" "pg_catalog"."text_ops" ASC NULLS LAST
+);
+CREATE INDEX "idx_agent_perf_runs_target_url" ON "public"."agent_perf_runs" USING btree (
+  "target_url" COLLATE "pg_catalog"."default" "pg_catalog"."text_ops" ASC NULLS LAST
+);
+
+-- ----------------------------
+-- Primary Key structure for table agent_perf_runs
+-- ----------------------------
+ALTER TABLE "public"."agent_perf_runs" ADD CONSTRAINT "agent_perf_runs_pkey" PRIMARY KEY ("run_id");
+
+-- ----------------------------
 -- Indexes structure for table agent_session_approvals
 -- ----------------------------
 CREATE INDEX "idx_agent_session_approvals_session_created" ON "public"."agent_session_approvals" USING btree (
@@ -588,6 +736,11 @@ CREATE INDEX "idx_agent_session_events_session_timestamp" ON "public"."agent_ses
   "session_id" COLLATE "pg_catalog"."default" "pg_catalog"."text_ops" ASC NULLS LAST,
   "timestamp" "pg_catalog"."timestamptz_ops" ASC NULLS LAST
 );
+CREATE INDEX "idx_agent_session_events_session_timestamp_id" ON "public"."agent_session_events" USING btree (
+  "session_id" COLLATE "pg_catalog"."default" "pg_catalog"."text_ops" ASC NULLS LAST,
+  "timestamp" "pg_catalog"."timestamptz_ops" ASC NULLS LAST,
+  "id" COLLATE "pg_catalog"."default" "pg_catalog"."text_ops" ASC NULLS LAST
+);
 
 -- ----------------------------
 -- Primary Key structure for table agent_session_events
@@ -606,6 +759,25 @@ CREATE INDEX "idx_agent_session_messages_session_created" ON "public"."agent_ses
 -- Primary Key structure for table agent_session_messages
 -- ----------------------------
 ALTER TABLE "public"."agent_session_messages" ADD CONSTRAINT "agent_session_messages_pkey" PRIMARY KEY ("id");
+
+-- ----------------------------
+-- Indexes structure for table agent_session_resources
+-- ----------------------------
+CREATE INDEX "idx_agent_session_resources_session_status" ON "public"."agent_session_resources" USING btree (
+  "session_id" COLLATE "pg_catalog"."default" "pg_catalog"."text_ops" ASC NULLS LAST,
+  "status" COLLATE "pg_catalog"."default" "pg_catalog"."text_ops" ASC NULLS LAST,
+  "updated_at" "pg_catalog"."timestamptz_ops" DESC NULLS FIRST
+);
+
+-- ----------------------------
+-- Uniques structure for table agent_session_resources
+-- ----------------------------
+ALTER TABLE "public"."agent_session_resources" ADD CONSTRAINT "agent_session_resources_session_id_kind_resource_key_key" UNIQUE ("session_id", "kind", "resource_key");
+
+-- ----------------------------
+-- Primary Key structure for table agent_session_resources
+-- ----------------------------
+ALTER TABLE "public"."agent_session_resources" ADD CONSTRAINT "agent_session_resources_pkey" PRIMARY KEY ("id");
 
 -- ----------------------------
 -- Indexes structure for table agent_session_snapshots
@@ -646,6 +818,47 @@ CREATE INDEX "idx_agent_sessions_updated" ON "public"."agent_sessions" USING btr
 -- Primary Key structure for table agent_sessions
 -- ----------------------------
 ALTER TABLE "public"."agent_sessions" ADD CONSTRAINT "agent_sessions_pkey" PRIMARY KEY ("id");
+
+-- ----------------------------
+-- Indexes structure for table agent_smoke_plan_catalog
+-- ----------------------------
+CREATE INDEX "idx_agent_smoke_plan_catalog_project_updated" ON "public"."agent_smoke_plan_catalog" USING btree (
+  "project_scope" COLLATE "pg_catalog"."default" "pg_catalog"."text_ops" ASC NULLS LAST,
+  "updated_at" "pg_catalog"."timestamptz_ops" DESC NULLS FIRST
+);
+
+-- ----------------------------
+-- Primary Key structure for table agent_smoke_plan_catalog
+-- ----------------------------
+ALTER TABLE "public"."agent_smoke_plan_catalog" ADD CONSTRAINT "agent_smoke_plan_catalog_pkey" PRIMARY KEY ("plan_id");
+
+-- ----------------------------
+-- Uniques structure for table agent_smoke_plan_versions
+-- ----------------------------
+ALTER TABLE "public"."agent_smoke_plan_versions" ADD CONSTRAINT "agent_smoke_plan_versions_plan_id_version_key" UNIQUE ("plan_id", "version");
+
+-- ----------------------------
+-- Primary Key structure for table agent_smoke_plan_versions
+-- ----------------------------
+ALTER TABLE "public"."agent_smoke_plan_versions" ADD CONSTRAINT "agent_smoke_plan_versions_pkey" PRIMARY KEY ("id");
+
+-- ----------------------------
+-- Primary Key structure for table agent_smoke_regression_candidates
+-- ----------------------------
+ALTER TABLE "public"."agent_smoke_regression_candidates" ADD CONSTRAINT "agent_smoke_regression_candidates_pkey" PRIMARY KEY ("case_id");
+
+-- ----------------------------
+-- Indexes structure for table agent_smoke_run_history
+-- ----------------------------
+CREATE INDEX "idx_agent_smoke_run_history_plan_started" ON "public"."agent_smoke_run_history" USING btree (
+  "plan_id" COLLATE "pg_catalog"."default" "pg_catalog"."text_ops" ASC NULLS LAST,
+  "started_at" "pg_catalog"."timestamptz_ops" DESC NULLS FIRST
+);
+
+-- ----------------------------
+-- Primary Key structure for table agent_smoke_run_history
+-- ----------------------------
+ALTER TABLE "public"."agent_smoke_run_history" ADD CONSTRAINT "agent_smoke_run_history_pkey" PRIMARY KEY ("run_id");
 
 -- ----------------------------
 -- Indexes structure for table agent_tool_artifacts

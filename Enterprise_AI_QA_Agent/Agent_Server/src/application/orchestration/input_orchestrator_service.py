@@ -5,9 +5,14 @@ from uuid import uuid4
 
 from src.domain.models import SessionRecord
 from src.registry.modes import ModeRegistry
+from src.application.intent.intent_recognition_service import IntentRecognitionService
+from src.application.intent.mode_selection_policy import ModeSelectionPolicy
+from src.application.intent.safety_intent_service import SafetyIntentService
+from src.application.intent.semantic_intent_service import SemanticIntentService
 from src.application.testing.direction_service import QATaskDirectionService
 from src.application.testing.mode_intent_service import TestModeIntentService
 from src.application.testing.router_service import QATaskRouterService
+from src.schemas.intent import IntentDecision
 from src.schemas.session import (
     ExecutionRequest,
     InputAttachment,
@@ -20,13 +25,49 @@ from src.schemas.session import (
 
 
 class InputOrchestratorService:
-    def __init__(self, mode_registry: ModeRegistry) -> None:
+    def __init__(
+        self,
+        mode_registry: ModeRegistry,
+        semantic_intent_service: SemanticIntentService | None = None,
+    ) -> None:
         self._mode_registry = mode_registry
         self._qa_task_direction_service = QATaskDirectionService()
         self._qa_task_router_service = QATaskRouterService()
         self._test_mode_intent_service = TestModeIntentService()
+        self._intent_recognition_service = IntentRecognitionService()
+        self._safety_intent_service = SafetyIntentService()
+        self._mode_selection_policy = ModeSelectionPolicy(mode_registry)
+        self._semantic_intent_service = semantic_intent_service
 
-    def orchestrate(self, session: SessionRecord, payload: SendMessageRequest) -> ExecutionRequest:
+    def set_semantic_intent_service(self, service: SemanticIntentService | None) -> None:
+        self._semantic_intent_service = service
+
+    async def orchestrate_async(
+        self,
+        session: SessionRecord,
+        payload: SendMessageRequest,
+    ) -> ExecutionRequest:
+        intent_override = None
+        if self._semantic_intent_service is not None:
+            normalized_input = " ".join(str(payload.content or "").split())
+            baseline = self._intent_recognition_service.recognize(
+                message=normalized_input,
+                context=self._recognition_context(session, payload),
+            )
+            intent_override = await self._semantic_intent_service.enrich(
+                message=normalized_input,
+                baseline=baseline,
+                model_key=payload.model_key or session.preferred_model,
+            )
+        return self.orchestrate(session, payload, intent_override=intent_override)
+
+    def orchestrate(
+        self,
+        session: SessionRecord,
+        payload: SendMessageRequest,
+        *,
+        intent_override: IntentDecision | None = None,
+    ) -> ExecutionRequest:
         raw_content = payload.content or ""
         content = raw_content.strip()
         attachments = list(payload.attachments)
@@ -71,7 +112,61 @@ class InputOrchestratorService:
             )
 
         normalized_input = " ".join(content.split())
-        mode = self._mode_registry.resolve(payload.mode_key or session.mode_key)
+        recognition_context = self._recognition_context(session, payload)
+        trusted_environment = str(session.metadata.get("environment") or "").strip().lower()
+        intent_decision = intent_override or self._intent_recognition_service.recognize(
+            message=normalized_input,
+            context=recognition_context,
+        )
+        safety_assessment = self._safety_intent_service.assess(
+            message=normalized_input,
+            intent=intent_decision,
+            context=payload.context,
+            trusted_context=session.metadata,
+        )
+        mode_selection = self._mode_selection_policy.resolve(
+            payload_mode_key=payload.mode_key,
+            session_mode_key=session.mode_key,
+            intent=intent_decision,
+            safety=safety_assessment,
+        )
+        hook_results.extend(
+            [
+                InputHookResult(
+                    hook_key="intent-recognition",
+                    status="applied",
+                    message="Structured task intent was recognized.",
+                    metadata={
+                        "candidate_mode_key": intent_decision.candidate_mode_key,
+                        "target_kind": intent_decision.target_kind,
+                        "confidence": intent_decision.confidence,
+                        "required_capabilities": list(intent_decision.required_capabilities),
+                    },
+                ),
+                InputHookResult(
+                    hook_key="safety-intent",
+                    status=("blocked" if safety_assessment.decision == "deny" else "applied"),
+                    message="Turn-level safety intent was evaluated.",
+                    metadata={
+                        "decision": safety_assessment.decision,
+                        "risk_level": safety_assessment.risk_level,
+                        "reason_codes": list(safety_assessment.reason_codes),
+                    },
+                ),
+                InputHookResult(
+                    hook_key="mode-selection-policy",
+                    status=("pending" if mode_selection.needs_confirmation else "applied"),
+                    message="The active mode was resolved through the activation policy.",
+                    metadata={
+                        "active_mode_key": mode_selection.active_mode_key,
+                        "candidate_mode_key": mode_selection.candidate_mode_key,
+                        "source": mode_selection.requested_mode_source,
+                        "needs_confirmation": mode_selection.needs_confirmation,
+                    },
+                ),
+            ]
+        )
+        mode = self._mode_registry.get(mode_selection.active_mode_key)
         skill_keys = list(dict.fromkeys([*mode.default_skill_keys, *payload.skill_keys]))
         mode_intent_state = None
 
@@ -153,6 +248,10 @@ class InputOrchestratorService:
         context = {
             **payload.context,
             "selected_mode": mode.model_dump(mode="python"),
+            "intent_decision": intent_decision.model_dump(mode="python"),
+            "safety_assessment": safety_assessment.model_dump(mode="python"),
+            "mode_selection": mode_selection.model_dump(mode="python"),
+            "required_capabilities": list(intent_decision.required_capabilities),
             "input_envelope": input_envelope.model_dump(mode="python"),
             "input_routing": routing_decision.model_dump(mode="python"),
             "test_task_state": {
@@ -168,6 +267,15 @@ class InputOrchestratorService:
             "hook_results": [result.model_dump(mode="python") for result in hook_results],
             "harness_flags": harness_flags,
         }
+        trusted_resource_scope = session.metadata.get("resource_scope")
+        if isinstance(trusted_resource_scope, dict):
+            context["resource_scope"] = dict(trusted_resource_scope)
+            context["trusted_resource_scope"] = dict(trusted_resource_scope)
+        if trusted_environment:
+            context["trusted_environment"] = trusted_environment
+        context["trusted_security_runtime_direct_execution"] = bool(
+            session.metadata.get("security_runtime_direct_execution", False)
+        )
         if mode_intent_state is not None:
             context.update(self._build_mode_intent_context(mode.key, mode_intent_state))
         payload_agent_key = (payload.agent_key or "").strip()
@@ -207,6 +315,11 @@ class InputOrchestratorService:
             "test_direction": test_task_state["direction"],
             "test_harness": test_route.get("harness", "base_conversation"),
             "mode_intent": mode_intent_state.intent_key if mode_intent_state is not None else "",
+            "recognized_mode": intent_decision.candidate_mode_key or "",
+            "mode_selection_source": mode_selection.requested_mode_source,
+            "mode_selection_needs_confirmation": mode_selection.needs_confirmation,
+            "safety_decision": safety_assessment.decision,
+            "safety_risk_level": safety_assessment.risk_level,
         }
 
         return ExecutionRequest(
@@ -229,6 +342,17 @@ class InputOrchestratorService:
             orchestration_meta=orchestration_meta,
             context=context,
         )
+
+    def _recognition_context(
+        self,
+        session: SessionRecord,
+        payload: SendMessageRequest,
+    ) -> dict:
+        context = dict(payload.context)
+        trusted_environment = str(session.metadata.get("environment") or "").strip().lower()
+        if trusted_environment:
+            context["environment"] = trusted_environment
+        return context
 
     def _build_routing_decision(
         self,

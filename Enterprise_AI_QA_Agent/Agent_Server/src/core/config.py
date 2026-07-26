@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     api_v1_prefix: str = "/api/v1"
     data_dir: str = "data"
     llm_request_timeout_seconds: float = 60.0
+    intent_semantic_classifier_enabled: bool = True
+    intent_deterministic_confidence_threshold: float = 0.82
     mysql_host: str = "127.0.0.1"
     mysql_port: int = 3307
     mysql_user: str = "root"

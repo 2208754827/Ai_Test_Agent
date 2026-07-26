@@ -20,6 +20,10 @@ MODE_MANIFEST = {
         "report-writer",
     ],
     "harness_key": "ui_automation_harness",
+    "activation_policy": "confirm",
+    "core_capability_keys": ["ui.automation"],
+    "on_demand_capability_keys": ["api.documentation.read", "report.generate"],
+    "public_entry_tool_key": "ui-automation-runner",
     "placeholder": False,
     "tags": ["testing", "ui", "automation"],
 }

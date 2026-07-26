@@ -46,6 +46,7 @@ from src.application.context.memory_runtime_service import MemoryRuntimeService
 from src.application.context.embedding_runtime_service import EmbeddingRuntimeService
 from src.application.context.mcp_runtime_service import MCPRuntimeService
 from src.application.models.model_runtime_service import ModelRuntimeService
+from src.application.intent.semantic_intent_service import SemanticIntentService
 from src.application.context.observation_runtime_service import ObservationRuntimeService
 from src.application.permissions.permission_service import PermissionService
 from src.application.prompting.prompt_assembly_service import PromptAssemblyService
@@ -190,6 +191,13 @@ async def lifespan(app: FastAPI):
         model_registry=model_registry,
         settings=settings,
         oauth_token_service=oauth_token_service,
+    )
+    input_orchestrator_service.set_semantic_intent_service(
+        SemanticIntentService(
+            model_runtime_service=model_runtime_service,
+            enabled=settings.intent_semantic_classifier_enabled,
+            deterministic_confidence_threshold=settings.intent_deterministic_confidence_threshold,
+        )
     )
     tool_runtime_service = ToolRuntimeService(
         request_timeout_seconds=settings.llm_request_timeout_seconds,

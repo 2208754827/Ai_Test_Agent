@@ -40,6 +40,7 @@ class AgentRegistry:
                         "mail-forward",
                         "mail-download-attachment",
                     ],
+                    supported_capabilities=["general.assistance", "mcp.external"],
                     supported_skills=["requirements-analysis", "risk-scoping", "report-synthesis", "mail-capability"],
                     tags=["core", "orchestration"],
                 )
@@ -340,6 +341,13 @@ class AgentRegistry:
                     summary="Run API contract, status, and payload validation workflows.",
                     description="Dedicated mode agent for API interface testing with focused verification output.",
                     supported_tools=["api-test-runner", "api-docs-library", "api-tester", "knowledge-rag", "report-writer"],
+                    supported_capabilities=[
+                        "api.validation",
+                        "api.documentation.read",
+                        "performance.load_test",
+                        "security.assessment",
+                        "report.generate",
+                    ],
                     supported_skills=["api-validation", "assertion-design"],
                     supported_models=["gpt-5.4", "deepseek-reasoner", "claude-sonnet-4"],
                     default_model="gpt-5.4",
@@ -478,6 +486,11 @@ class AgentRegistry:
                         "report-writer",
                         "observation-search",
                         "session-history",
+                    ],
+                    supported_capabilities=[
+                        "security.assessment",
+                        "api.documentation.read",
+                        "report.generate",
                     ],
                     supported_skills=["vulnerability-analysis", "network-reconnaissance"],
                     supported_models=["claude-sonnet-4", "gpt-5.4", "deepseek-reasoner"],

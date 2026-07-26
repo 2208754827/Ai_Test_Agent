@@ -24,6 +24,10 @@ MODE_MANIFEST = {
         "knowledge-rag",
     ],
     "harness_key": "smoke_testing_harness",
+    "activation_policy": "confirm",
+    "core_capability_keys": ["smoke.validation"],
+    "on_demand_capability_keys": ["api.documentation.read", "report.generate"],
+    "public_entry_tool_key": "smoke-suite-runner",
     "placeholder": False,
     "tags": ["testing", "smoke", "approval", "regression-candidate"],
 }

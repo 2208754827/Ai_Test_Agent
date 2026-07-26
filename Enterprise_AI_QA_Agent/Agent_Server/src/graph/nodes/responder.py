@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from src.graph.state import AgentGraphState
+from src.application.security.output_safety_policy import OutputSafetyPolicy
 from src.runtime.execution_logging import append_graph_event, truncate_text
 
 
@@ -21,7 +22,8 @@ def responder(state: AgentGraphState) -> AgentGraphState:
         else "No pending approvals. The runtime skeleton completed this turn without blocking tools."
     )
 
-    state["final_response"] = state["final_response"].strip()
+    sanitized_response, redacted = OutputSafetyPolicy().sanitize_text(state["final_response"].strip())
+    state["final_response"] = sanitized_response
     append_graph_event(
         state,
         "graph.response_ready",
@@ -39,6 +41,7 @@ def responder(state: AgentGraphState) -> AgentGraphState:
         tool_status=tool_text,
         approval_status=approval_text,
         pending_approval_count=len(state["pending_approvals"]),
+        sensitive_output_redacted=redacted,
         response_preview=truncate_text(state["final_response"], 180),
     )
     return state

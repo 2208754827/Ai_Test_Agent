@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 
 PermissionLevel = Literal["safe", "ask", "restricted"]
+ToolExposure = Literal["shared", "workflow_entry", "internal"]
 
 
 class ToolDescriptor(BaseModel):
@@ -19,6 +20,13 @@ class ToolDescriptor(BaseModel):
     supports_streaming: bool = False
     enabled_by_default: bool = True
     tags: list[str] = Field(default_factory=list)
+    capability_keys: list[str] = Field(default_factory=list)
+    exposure: ToolExposure = "shared"
+    owner_mode_key: str | None = None
+    allowed_mode_keys: list[str] = Field(default_factory=list)
+    denied_mode_keys: list[str] = Field(default_factory=list)
+    required_context_keys: list[str] = Field(default_factory=list)
+    required_permissions: list[str] = Field(default_factory=list)
 
 
 class ModelDescriptor(BaseModel):
@@ -59,6 +67,7 @@ class AgentDescriptor(BaseModel):
     summary: str
     description: str
     supported_tools: list[str] = Field(default_factory=list)
+    supported_capabilities: list[str] = Field(default_factory=list)
     supported_skills: list[str] = Field(default_factory=list)
     supported_models: list[str] = Field(default_factory=list)
     default_model: str | None = None

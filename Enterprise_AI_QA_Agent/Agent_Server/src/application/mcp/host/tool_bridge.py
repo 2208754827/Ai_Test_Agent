@@ -34,5 +34,6 @@ class McpToolBridge:
             permission_level="ask",
             input_schema=tool.input_schema or {"type": "object", "additionalProperties": True},
             output_schema={"type": "object", "additionalProperties": True},
+            capability_keys=["mcp.external"],
             tags=["mcp", server_key],
         )

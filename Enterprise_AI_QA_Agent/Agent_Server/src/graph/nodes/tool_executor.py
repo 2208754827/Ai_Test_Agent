@@ -5,6 +5,9 @@ import re
 from typing import Any
 
 from src.application.permissions.permission_service import PermissionPolicyContext, PermissionService
+from src.application.security.approval_scope_service import ApprovalScopeService
+from src.application.security.execution_safety_policy import ExecutionSafetyPolicy
+from src.application.security.prompt_injection_policy import PromptInjectionPolicy
 from src.application.runtime.tool_job_service import ToolJobService
 from src.application.runtime.tool_runtime_service import ToolExecutionContext, ToolRuntimeService
 from src.application.skills.skill_runtime_service import SkillRuntimeService
@@ -74,6 +77,11 @@ def build_tool_executor_node(
                 tool_context=tool_context,
                 skill_registry=skill_registry,
                 skill_runtime_service=skill_runtime_service,
+            )
+            _apply_tool_output_restrictions(
+                state=state,
+                execution_record=execution_record,
+                tool_registry=tool_registry,
             )
             tool_results.append(execution_record["tool_result"])
             if execution_record["tool_message"]:
@@ -167,6 +175,7 @@ async def _resolve_tool_call(
     skill_registry: SkillRegistry | None = None,
     skill_runtime_service: SkillRuntimeService | None = None,
 ) -> dict[str, Any]:
+    state.setdefault("event_log", [])
     permission_decision = _find_permission_decision(state, tool_call.name)
     try:
         tool = tool_registry.get(tool_call.name)
@@ -189,6 +198,36 @@ async def _resolve_tool_call(
             tool_key=tool_call.name,
             call_id=tool_call.id,
             status="failed",
+        )
+        return {
+            "tool_result": result.model_dump(mode="python"),
+            "tool_message": build_tool_message(result),
+            "approval": None,
+        }
+
+    if tool.key not in state.get("available_tool_keys", []):
+        reason = f"Tool '{tool.name}' was not exposed to the selected agent for this turn."
+        result = ToolExecutionRecord(
+            call_id=tool_call.id,
+            tool_key=tool.key,
+            tool_name=tool.name,
+            status="denied",
+            summary=reason,
+            input=tool_call.arguments,
+            output={
+                "error": "tool_not_exposed",
+                "permission_reason": reason,
+                "permission_reason_code": "tool_not_exposed_to_agent",
+            },
+        )
+        append_graph_event(
+            state,
+            "tool.execution_denied",
+            "tool_executor",
+            reason,
+            tool_key=tool.key,
+            call_id=tool_call.id,
+            permission_reason_code="tool_not_exposed_to_agent",
         )
         return {
             "tool_result": result.model_dump(mode="python"),
@@ -229,6 +268,41 @@ async def _resolve_tool_call(
             permission_source=(permission_decision or {}).get("source", "static_policy"),
             permission_reason=denial_reason,
             permission_reason_code=(permission_decision or {}).get("reason_code", "restricted_default_deny"),
+        )
+        return {
+            "tool_result": result.model_dump(mode="python"),
+            "tool_message": build_tool_message(result),
+            "approval": None,
+        }
+
+    execution_safety = ExecutionSafetyPolicy().evaluate_tool_call(
+        tool=tool,
+        arguments=tool_call.arguments,
+        active_mode_key=str(state.get("mode_key") or "default"),
+        context=state.get("context_bundle") or {},
+    )
+    if execution_safety.behavior == "deny":
+        result = ToolExecutionRecord(
+            call_id=tool_call.id,
+            tool_key=tool.key,
+            tool_name=tool.name,
+            status="denied",
+            summary=execution_safety.reason,
+            input=tool_call.arguments,
+            output={
+                "error": "execution_safety_denied",
+                "permission_reason": execution_safety.reason,
+                "permission_reason_code": execution_safety.reason_code,
+            },
+        )
+        append_graph_event(
+            state,
+            "tool.execution_denied",
+            "tool_executor",
+            execution_safety.reason,
+            tool_key=tool.key,
+            call_id=tool_call.id,
+            permission_reason_code=execution_safety.reason_code,
         )
         return {
             "tool_result": result.model_dump(mode="python"),
@@ -329,15 +403,31 @@ async def _resolve_tool_call(
             "approval": None,
         }
 
-    if tool.key in state["approval_required_tool_keys"]:
+    if tool.key in state["approval_required_tool_keys"] or execution_safety.behavior == "ask":
         reason = str(
-            (permission_decision or {}).get("reason")
+            execution_safety.reason
+            or (permission_decision or {}).get("reason")
             or (
                 f"Tool '{tool.name}' requires explicit approval before execution "
                 f"in {state['session_mode']} mode."
             )
         )
-        permission_source = str((permission_decision or {}).get("source") or "static_policy")
+        execution_policy_approval = execution_safety.behavior == "ask"
+        permission_source = (
+            "execution_safety_policy"
+            if execution_policy_approval
+            else str((permission_decision or {}).get("source") or "static_policy")
+        )
+        permission_reason_code = (
+            execution_safety.reason_code
+            if execution_policy_approval
+            else str((permission_decision or {}).get("reason_code") or "approval_required_default")
+        )
+        permission_policy_key = (
+            "execution_safety_policy.tool_call"
+            if execution_policy_approval
+            else str((permission_decision or {}).get("policy_key") or "permission_level.ask")
+        )
         approval_job_id = None
         if tool_job_service is not None:
             approval_job = await tool_job_service.create_job(
@@ -355,8 +445,8 @@ async def _resolve_tool_call(
                     "permission_source": permission_source,
                     "permission_reason": reason,
                     "permission_visibility": str((permission_decision or {}).get("visibility") or "visible"),
-                    "permission_reason_code": str((permission_decision or {}).get("reason_code") or "approval_required_default"),
-                    "permission_policy_key": str((permission_decision or {}).get("policy_key") or "permission_level.ask"),
+                    "permission_reason_code": permission_reason_code,
+                    "permission_policy_key": permission_policy_key,
                 },
             )
             approval_job_id = approval_job.id
@@ -376,8 +466,14 @@ async def _resolve_tool_call(
                 "permission_source": permission_source,
                 "permission_reason": reason,
                 "permission_visibility": str((permission_decision or {}).get("visibility") or "visible"),
-                "permission_reason_code": str((permission_decision or {}).get("reason_code") or "approval_required_default"),
-                "permission_policy_key": str((permission_decision or {}).get("policy_key") or "permission_level.ask"),
+                "permission_reason_code": permission_reason_code,
+                "permission_policy_key": permission_policy_key,
+                "approval_scope_hash": ApprovalScopeService().build_hash(
+                    mode_key=str(state.get("mode_key") or "default"),
+                    tool_key=tool.key,
+                    arguments=tool_call.arguments,
+                    context=state.get("context_bundle") or {},
+                ),
             },
         )
         result = ToolExecutionRecord(
@@ -403,7 +499,7 @@ async def _resolve_tool_call(
             approval_id=approval.id,
             arguments=tool_call.arguments,
             permission_source=permission_source,
-            permission_reason_code=str((permission_decision or {}).get("reason_code") or "approval_required_default"),
+            permission_reason_code=permission_reason_code,
         )
         return {
             "tool_result": result.model_dump(mode="python"),
@@ -447,6 +543,8 @@ def build_tool_message(record: ToolExecutionRecord) -> dict[str, Any]:
         "status": record.status,
         "summary": record.summary,
         "output": record.output,
+        "content_provenance": "tool_output",
+        "instruction_authority": "none",
     }
     return {
         "role": "tool",
@@ -571,6 +669,20 @@ def _run_skill_loader(
     action = str(arguments.get("action") or "load").strip().lower()
     requested_keys = [str(item).strip() for item in arguments.get("skill_keys", []) if str(item).strip()]
     query = str(arguments.get("query") or "").strip()
+    safety_assessment = dict(state.get("context_bundle", {}).get("safety_assessment") or {})
+    if action != "search" and "do_not_expand_tool_access" in safety_assessment.get("restrictions", []):
+        return ToolExecutionRecord(
+            call_id=tool_call.id,
+            tool_key="skill",
+            tool_name="Skill Loader",
+            status="denied",
+            summary="Skill loading is frozen because untrusted content contained control-like instructions.",
+            input=arguments,
+            output={
+                "error": "tool_expansion_frozen",
+                "reason_code": "indirect_prompt_injection_restriction",
+            },
+        )
     catalog = skill_registry.list()
     matched = skill_registry.get_many(requested_keys) or _match_skills(catalog, query)
     matched_payload = [
@@ -645,6 +757,45 @@ def _run_skill_loader(
     )
 
 
+def _apply_tool_output_restrictions(
+    *,
+    state: AgentGraphState,
+    execution_record: dict[str, Any],
+    tool_registry: ToolRegistry,
+) -> None:
+    tool_result = execution_record.get("tool_result")
+    if not isinstance(tool_result, dict):
+        return
+    output = tool_result.get("output")
+    security = output.get("_security") if isinstance(output, dict) else None
+    signals = security.get("indirect_injection_signals") if isinstance(security, dict) else None
+    if not isinstance(signals, list) or not signals:
+        return
+
+    context_bundle = dict(state.get("context_bundle") or {})
+    safety = dict(context_bundle.get("safety_assessment") or {})
+    assessment = PromptInjectionPolicy().assess(output, "tool_output")
+    safety = PromptInjectionPolicy().merge_into_safety(safety, [assessment])
+    context_bundle["safety_assessment"] = safety
+    state["context_bundle"] = context_bundle
+
+    required_capabilities = set(context_bundle.get("required_capabilities") or [])
+    state["deferred_tool_keys"] = [
+        key
+        for key in state.get("deferred_tool_keys", [])
+        if required_capabilities.intersection(tool_registry.get(key).capability_keys)
+    ]
+    append_graph_event(
+        state,
+        "security.indirect_prompt_injection_detected",
+        "tool_executor",
+        "Tool output contained control-like instructions and dynamic tool expansion was frozen.",
+        tool_key=tool_result.get("tool_key"),
+        signal_keys=list(dict.fromkeys(str(item) for item in signals)),
+        remaining_deferred_tool_count=len(state["deferred_tool_keys"]),
+    )
+
+
 def _match_skills(catalog: list[Any], query: str) -> list[Any]:
     terms = _search_terms(query)
     if not terms:
@@ -676,6 +827,7 @@ def _search_terms(query: str) -> list[str]:
 def _permission_context_from_state(state: AgentGraphState) -> PermissionPolicyContext:
     input_envelope = dict(state.get("context_bundle", {}).get("input_envelope") or {})
     input_routing = dict(state.get("context_bundle", {}).get("input_routing") or {})
+    safety_assessment = dict(state.get("context_bundle", {}).get("safety_assessment") or {})
     return PermissionPolicyContext(
         session_mode=SessionMode(state["session_mode"]),
         runtime_mode=RuntimeMode(state["runtime_mode"]),
@@ -684,6 +836,12 @@ def _permission_context_from_state(state: AgentGraphState) -> PermissionPolicyCo
         submit_mode=str(input_envelope.get("submit_mode") or "immediate"),
         execution_lane=str(input_routing.get("execution_lane") or "conversation_turn"),
         source=str(input_envelope.get("source") or "session.send_message"),
+        active_mode_key=str(state.get("mode_key") or "default"),
+        workflow_mode_key=str(state.get("mode_key") or "default"),
+        safety_decision=str(safety_assessment.get("decision") or "allow"),
+        safety_risk_level=str(safety_assessment.get("risk_level") or "low"),
+        authorization_status=str(safety_assessment.get("authorization_status") or "not_required"),
+        environment=str(safety_assessment.get("environment") or "unknown"),
     )
 
 

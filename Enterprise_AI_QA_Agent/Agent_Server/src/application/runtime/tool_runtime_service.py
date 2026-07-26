@@ -22,6 +22,8 @@ from src.application.mcp.host.connection_manager import McpConnectionManager
 from src.application.mcp.host.namespace import decode as decode_mcp_tool_key
 from src.application.mcp.host.namespace import is_mcp_tool_key
 from src.application.security.execution_environment_service import SecurityExecutionEnvironmentService
+from src.application.security.output_safety_policy import OutputSafetyPolicy
+from src.application.security.resource_access_policy import ResourceAccessPolicy
 from src.modes.code_review_mode import build_code_review_campaign
 from src.modes.code_review_mode.governance import CodeGovernanceRuntime
 from src.modes.code_review_mode.project_source import (
@@ -110,6 +112,7 @@ class ToolRuntimeService:
         self._api_docs_service = api_docs_service
         self._session_store = session_store
         self._transcript_hygiene_service = transcript_hygiene_service or TranscriptHygieneService()
+        self._output_safety_policy = OutputSafetyPolicy()
         self._coordinator_runtime_service = coordinator_runtime_service
         self._mcp_connection_manager = mcp_connection_manager
         self._compatibility_runner_service = compatibility_runner_service
@@ -358,6 +361,7 @@ class ToolRuntimeService:
                     turn_id=job_context.turn_id,
                     tool_key=tool.key,
                 )
+            result, _, _ = self._output_safety_policy.sanitize_tool_output(result)
             resolved_status = self._resolve_result_status(result)
             summary = str(result.get("summary", f"Tool '{tool.key}' completed."))
             if job is not None and self._tool_job_service is not None:
@@ -409,23 +413,24 @@ class ToolRuntimeService:
                 completed_at=datetime.utcnow(),
             )
         except Exception as exc:
+            sanitized_error, _ = self._output_safety_policy.sanitize_text(str(exc))
             if job is not None and self._tool_job_service is not None:
                 await self._tool_job_service.mark_failed(
                     job.id,
                     summary=f"Tool '{tool.key}' failed.",
-                    error_message=str(exc),
-                    output_payload={"error": str(exc)},
+                    error_message=sanitized_error,
+                    output_payload={"error": sanitized_error},
                 )
             return ToolExecutionRecord(
                 call_id=call.id,
                 tool_key=tool.key,
                 tool_name=tool.name,
                 status="failed",
-                summary=f"Tool '{tool.key}' failed: {exc}",
+                summary=f"Tool '{tool.key}' failed: {sanitized_error}",
                 trace_id=context.trace_id,
                 job_id=job.id if job is not None else None,
                 input=call.arguments,
-                output={"error": str(exc)},
+                output={"error": sanitized_error},
                 started_at=started_at,
                 completed_at=datetime.utcnow(),
             )
@@ -552,9 +557,13 @@ class ToolRuntimeService:
         limit = _clamp_int(arguments.get("limit"), default=10, minimum=1, maximum=50)
         max_chars = _clamp_int(arguments.get("max_chars"), default=4000, minimum=500, maximum=20000)
         include_preview = bool(arguments.get("include_preview", False))
+        project_name, project_url = ResourceAccessPolicy().resolve_api_doc_filters(
+            arguments=arguments,
+            context=context.context_bundle,
+        )
 
         if action == "list":
-            documents = await service.list_documents()
+            documents = await service.list_documents(project_name=project_name, project_url=project_url)
             selected = documents[:limit]
             return {
                 "status": "completed",
@@ -575,7 +584,13 @@ class ToolRuntimeService:
             doc_id = str(arguments.get("doc_id") or "").strip()
             query = str(arguments.get("query") or "").strip()
             if not doc_id and query:
-                resolved = await service.search_documents(query=query, limit=1, max_chars=800)
+                resolved = await service.search_documents(
+                    query=query,
+                    project_name=project_name,
+                    project_url=project_url,
+                    limit=1,
+                    max_chars=800,
+                )
                 matches = resolved.get("matches") if isinstance(resolved.get("matches"), list) else []
                 if matches and isinstance(matches[0], dict):
                     doc_id = str(matches[0].get("doc_id") or "")
@@ -588,9 +603,17 @@ class ToolRuntimeService:
                     "error": "missing_doc_id",
                 }
 
+            endpoint_result = await service.search_documents(
+                doc_id=doc_id,
+                project_name=project_name,
+                project_url=project_url,
+                limit=50,
+                max_chars=800,
+            )
+            if not endpoint_result.get("matches") and (project_name or project_url):
+                raise PermissionError("API document is outside the active resource scope.")
             content_result = await service.read_document_content(doc_id, max_chars=max_chars)
             document = dict(content_result.get("document") or {})
-            endpoint_result = await service.search_documents(doc_id=doc_id, limit=50, max_chars=800)
             endpoint_index = [
                 {
                     "method": item.get("method"),
@@ -624,8 +647,8 @@ class ToolRuntimeService:
             result = await service.search_documents(
                 query=query,
                 doc_id=str(arguments.get("doc_id") or "").strip() or None,
-                project_name=str(arguments.get("project_name") or "").strip() or None,
-                project_url=str(arguments.get("project_url") or "").strip() or None,
+                project_name=project_name,
+                project_url=project_url,
                 method=str(arguments.get("method") or "").strip() or None,
                 path=str(arguments.get("path") or "").strip() or None,
                 limit=limit,
@@ -2780,6 +2803,10 @@ class ToolRuntimeService:
         resolution = ApiDocResolutionService(api_docs_service=self._api_docs_service)
 
         try:
+            project_name, project_url = ResourceAccessPolicy().resolve_api_doc_filters(
+                arguments=arguments,
+                context=context.context_bundle,
+            )
             if action == "import_url":
                 url = str(arguments.get("url") or "").strip()
                 if not url:
@@ -2787,8 +2814,8 @@ class ToolRuntimeService:
                 result = await resolution.ingest_doc_from_url(
                     url=url,
                     title=arguments.get("title"),
-                    project_name=arguments.get("project_name"),
-                    project_url=arguments.get("project_url"),
+                    project_name=project_name,
+                    project_url=project_url,
                 )
                 return result
             elif action == "import_attachment":
@@ -2800,8 +2827,8 @@ class ToolRuntimeService:
                     filename=filename,
                     content_base64=content_base64,
                     title=arguments.get("title"),
-                    project_name=arguments.get("project_name"),
-                    project_url=arguments.get("project_url"),
+                    project_name=project_name,
+                    project_url=project_url,
                     content_type=arguments.get("content_type"),
                 )
                 return result

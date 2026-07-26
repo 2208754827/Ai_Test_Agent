@@ -15,6 +15,7 @@ def build_permission_gate(
         tool_descriptors = tool_registry.get_many(state["available_tool_keys"])
         input_envelope = dict(state.get("context_bundle", {}).get("input_envelope") or {})
         input_routing = dict(state.get("context_bundle", {}).get("input_routing") or {})
+        safety_assessment = dict(state.get("context_bundle", {}).get("safety_assessment") or {})
         policy_context = PermissionPolicyContext(
             session_mode=SessionMode(state["session_mode"]),
             runtime_mode=RuntimeMode(state["runtime_mode"]),
@@ -23,6 +24,12 @@ def build_permission_gate(
             submit_mode=str(input_envelope.get("submit_mode") or "immediate"),
             execution_lane=str(input_routing.get("execution_lane") or "conversation_turn"),
             source=str(input_envelope.get("source") or "session.send_message"),
+            active_mode_key=str(state.get("mode_key") or "default"),
+            workflow_mode_key=str(state.get("mode_key") or "default"),
+            safety_decision=str(safety_assessment.get("decision") or "allow"),
+            safety_risk_level=str(safety_assessment.get("risk_level") or "low"),
+            authorization_status=str(safety_assessment.get("authorization_status") or "not_required"),
+            environment=str(safety_assessment.get("environment") or "unknown"),
         )
         evaluation = permission_service.evaluate(
             policy_context=policy_context,

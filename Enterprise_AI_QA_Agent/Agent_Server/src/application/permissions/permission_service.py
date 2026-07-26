@@ -22,6 +22,12 @@ class PermissionPolicyContext:
     submit_mode: str
     execution_lane: str
     source: str = "session.send_message"
+    active_mode_key: str = "default"
+    workflow_mode_key: str = "default"
+    safety_decision: str = "allow"
+    safety_risk_level: str = "low"
+    authorization_status: str = "not_required"
+    environment: str = "unknown"
 
 
 @dataclass
@@ -63,6 +69,15 @@ class PermissionEvaluation:
 
 
 class PermissionService:
+    SIDE_EFFECT_CATEGORIES = {
+        "execution",
+        "automation",
+        "security",
+        "orchestration",
+        "communication",
+        "review",
+    }
+
     def evaluate(
         self,
         policy_context: PermissionPolicyContext,
@@ -142,6 +157,65 @@ class PermissionService:
         policy_context: PermissionPolicyContext,
         tool: ToolDescriptor,
     ) -> ToolPermissionDecision:
+        if tool.exposure == "internal" and tool.owner_mode_key != policy_context.active_mode_key:
+            return self._decision(
+                tool=tool,
+                behavior="deny",
+                visibility="hidden",
+                reason=f"Internal tool '{tool.name}' belongs to mode '{tool.owner_mode_key}'.",
+                reason_code="cross_mode_internal_tool_denied",
+                policy_key="tool.exposure.internal",
+            )
+
+        if policy_context.safety_decision == "deny" and tool.category in self.SIDE_EFFECT_CATEGORIES:
+            return self._decision(
+                tool=tool,
+                behavior="deny",
+                visibility="hidden",
+                reason=f"Tool '{tool.name}' is blocked by the turn-level safety assessment.",
+                reason_code="turn_safety_denied",
+                policy_key="turn.safety.decision",
+            )
+
+        if (
+            policy_context.safety_decision == "require_authorization"
+            and ("security.assessment" in tool.capability_keys or tool.owner_mode_key == "security_testing")
+        ):
+            return self._decision(
+                tool=tool,
+                behavior="deny",
+                visibility="hidden",
+                reason="Verified target authorization is required before active security tooling can run.",
+                reason_code="security_authorization_required",
+                policy_key="turn.safety.authorization",
+            )
+
+        if (
+            tool.exposure == "workflow_entry"
+            and tool.owner_mode_key != policy_context.active_mode_key
+        ):
+            return self._decision(
+                tool=tool,
+                behavior="ask",
+                visibility="visible",
+                reason=f"Cross-mode workflow '{tool.owner_mode_key}' requires explicit approval.",
+                reason_code="cross_mode_workflow_approval_required",
+                policy_key="tool.exposure.workflow_entry",
+            )
+
+        if (
+            policy_context.safety_decision == "require_confirmation"
+            and tool.category in self.SIDE_EFFECT_CATEGORIES
+        ):
+            return self._decision(
+                tool=tool,
+                behavior="ask",
+                visibility="visible",
+                reason=f"Tool '{tool.name}' requires confirmation for this request's side effects.",
+                reason_code="turn_confirmation_required",
+                policy_key="turn.safety.confirmation",
+            )
+
         if not tool.enabled_by_default:
             return self._decision(
                 tool=tool,

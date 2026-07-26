@@ -559,7 +559,7 @@ class SessionService:
 
         async with session_lock:
             session = await self._require_session(session_id)
-            execution_request = self._input_orchestrator_service.orchestrate(session, payload)
+            execution_request = await self._input_orchestrator_service.orchestrate_async(session, payload)
             busy_response = await self._handle_busy_submission(
                 session=session,
                 payload=payload,
@@ -1074,7 +1074,10 @@ class SessionService:
                 await self._run_submission_locked(
                     session=session,
                     payload=next_entry.payload,
-                    execution_request=self._input_orchestrator_service.orchestrate(session, next_entry.payload),
+                    execution_request=await self._input_orchestrator_service.orchestrate_async(
+                        session,
+                        next_entry.payload,
+                    ),
                     allow_interrupted=session.status == SessionStatus.interrupted,
                 )
 

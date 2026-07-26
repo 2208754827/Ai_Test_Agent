@@ -22,6 +22,9 @@ MODE_MANIFEST = {
         "report-writer",
     ],
     "harness_key": "default_conversation_harness",
+    "activation_policy": "auto",
+    "core_capability_keys": ["general.assistance"],
+    "on_demand_capability_keys": ["api.documentation.read", "report.generate"],
     "placeholder": False,
     "tags": ["default", "general", "coordinator"],
 }

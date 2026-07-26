@@ -40,6 +40,12 @@ MODE_MANIFEST = {
         "session-history",
     ],
     "harness_key": "security_testing_harness",
+    "activation_policy": "explicit_only",
+    "minimum_authorization": "verified_target_authorization",
+    "maximum_auto_risk_level": "low",
+    "core_capability_keys": ["security.assessment"],
+    "on_demand_capability_keys": ["api.documentation.read", "report.generate"],
+    "public_entry_tool_key": "security-scan-runner",
     "placeholder": False,
     "tags": ["testing", "security", "penetration", "vulnerability"],
 }

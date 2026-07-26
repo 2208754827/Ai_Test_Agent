@@ -36,10 +36,22 @@ class ApiDocsService:
         self._lock = asyncio.Lock()
         self._data_dir.mkdir(parents=True, exist_ok=True)
 
-    async def list_documents(self) -> list[ApiDocRecord]:
+    async def list_documents(
+        self,
+        *,
+        project_name: str | None = None,
+        project_url: str | None = None,
+    ) -> list[ApiDocRecord]:
         async with self._lock:
             catalog = self._load_catalog()
         items = [ApiDocRecord.model_validate(self._normalize_catalog_item(item)) for item in catalog]
+        normalized_name = self._normalize_optional_text(project_name)
+        normalized_url = self._normalize_optional_text(project_url)
+        if normalized_name:
+            items = [item for item in items if (item.project_name or "").casefold() == normalized_name.casefold()]
+        if normalized_url:
+            expected_url = normalized_url.rstrip("/").casefold()
+            items = [item for item in items if (item.project_url or "").rstrip("/").casefold() == expected_url]
         return sorted(items, key=lambda item: item.updated_at, reverse=True)
 
     async def get_document(self, doc_id: str) -> ApiDocRecord:
@@ -107,7 +119,10 @@ class ApiDocsService:
         max_chars = self._clamp_int(max_chars, default=1200, minimum=200, maximum=12000)
         tokens = self._search_tokens(normalized_query)
 
-        documents = await self.list_documents()
+        documents = await self.list_documents(
+            project_name=normalized_project_name,
+            project_url=normalized_project_url,
+        )
         matches: list[dict[str, Any]] = []
         searched_count = 0
         for record in documents:

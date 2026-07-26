@@ -2034,7 +2034,67 @@ class ToolRegistry:
                 handler_key="mail-download-attachment",
             ),
         }
+        self._apply_exposure_metadata()
         self._dynamic_tools: dict[str, ToolModule] = {}
+
+    def _apply_exposure_metadata(self) -> None:
+        workflow_entries = {
+            "api-test-runner": ("api_testing", ["api.validation"]),
+            "performance-test-runner": ("performance_testing", ["performance.load_test"]),
+            "security-scan-runner": ("security_testing", ["security.assessment"]),
+            "ui-automation-runner": ("ui_automation", ["ui.automation"]),
+            "compatibility-test-runner": ("compatibility_testing", ["compatibility.matrix_test"]),
+            "smoke-suite-runner": ("smoke_testing", ["smoke.validation"]),
+            "code-review-orchestrator": ("code_review", ["code.review"]),
+        }
+        shared = {
+            "api-docs-library": ["api.documentation.read"],
+            "api-docs-ingest": ["api.documentation.write"],
+            "knowledge-rag": ["knowledge.search"],
+            "report-writer": ["report.generate"],
+            "attachment-reader": ["resource.attachment.read"],
+        }
+        internal_by_mode = {
+            "performance_testing": {
+                "perf-plan-compiler", "perf-result-analyzer", "perf-engine-select", "http-probe-runner",
+                "mock-target-runner", "performance-engine-runner", "perf-container-manager",
+            },
+            "security_testing": {
+                "network-recon-runner", "web-scan-runner", "service-audit-runner",
+                "credential-attack-runner", "traffic-analysis-runner", "exploit-workbench-runner",
+            },
+            "code_review": {
+                "code-governance-runner", "project-source-loader", "project-tree-scanner",
+                "project-file-reader", "project-diff-reader",
+            },
+        }
+        for key, (owner_mode_key, capability_keys) in workflow_entries.items():
+            self._replace_descriptor(
+                key,
+                exposure="workflow_entry",
+                owner_mode_key=owner_mode_key,
+                capability_keys=capability_keys,
+            )
+        for key, capability_keys in shared.items():
+            self._replace_descriptor(key, exposure="shared", capability_keys=capability_keys)
+        self._replace_descriptor("api-docs-ingest", permission_level="ask")
+        for owner_mode_key, keys in internal_by_mode.items():
+            for key in keys:
+                self._replace_descriptor(
+                    key,
+                    exposure="internal",
+                    owner_mode_key=owner_mode_key,
+                    capability_keys=[f"{owner_mode_key}.internal"],
+                )
+
+    def _replace_descriptor(self, key: str, **updates) -> None:
+        module = self._tools.get(key)
+        if module is None:
+            return
+        self._tools[key] = ToolModule(
+            descriptor=module.descriptor.model_copy(update=updates),
+            handler_key=module.handler_key,
+        )
 
     def list(self) -> list[ToolDescriptor]:
         return [
@@ -2132,6 +2192,9 @@ class ToolRegistry:
             "supports_streaming": tool.supports_streaming,
             "enabled_by_default": tool.enabled_by_default,
             "tags": list(tool.tags),
+            "capability_keys": list(tool.capability_keys),
+            "exposure": tool.exposure,
+            "owner_mode_key": tool.owner_mode_key,
         }
 
     def _parse_select_query(self, query: str) -> list[str]:
