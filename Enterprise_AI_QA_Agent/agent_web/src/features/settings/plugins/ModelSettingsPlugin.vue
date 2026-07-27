@@ -657,17 +657,24 @@ async function deleteModel(item: ModelConfigPublic) {
 
     <!-- editor modal -->
     <div v-if="showEditorModal" class="settings-modal-overlay" @click.self="closeEditorModal">
-      <section class="settings-modal-card settings-modal-card-clean">
+      <section
+        class="settings-modal-card settings-modal-card-clean settings-model-editor-modal"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="isEditing ? t('modelSettings.edit_model') : t('modelSettings.add_model')"
+      >
         <div class="settings-modal-head">
           <div>
             <h4>{{ isEditing ? t("modelSettings.edit_model") : t("modelSettings.add_model") }}</h4>
             <p>{{ isEditing ? t("modelSettings.edit_model_desc") : t("modelSettings.add_model_desc") }}</p>
           </div>
-          <button type="button" class="settings-modal-close" @click="closeEditorModal">×</button>
+          <button type="button" class="settings-modal-close" :title="t('modelSettings.cancel')" @click="closeEditorModal">
+            <i class="fa-solid fa-xmark"></i>
+          </button>
         </div>
 
-        <!-- ── Auth type switch ── -->
-        <div class="form-grid two">
+        <div class="settings-model-editor-body">
+          <div class="form-grid two settings-model-editor-form">
           <div class="full settings-auth-type-row">
             <span class="settings-auth-type-label">{{ t("modelSettings.auth_type") }}</span>
             <div class="settings-auth-type-btns">
@@ -708,7 +715,7 @@ async function deleteModel(item: ModelConfigPublic) {
               />
             </label>
 
-            <label>
+            <label class="full">
               <span>{{ t("modelSettings.base_url") }}</span>
               <input v-model="modelDraft.base_url" type="text" placeholder="https://api.deepseek.com/v1" />
             </label>
@@ -854,6 +861,8 @@ async function deleteModel(item: ModelConfigPublic) {
             </label>
           </template>
 
+          <div class="full settings-model-editor-divider" aria-hidden="true"></div>
+
           <label>
             <span>{{ t("modelSettings.context_window") }}</span>
             <input
@@ -899,10 +908,11 @@ async function deleteModel(item: ModelConfigPublic) {
             </div>
           </div>
 
-          <label v-if="appliesToTaskExecution" class="checkbox-row full">
+          <label v-if="appliesToTaskExecution" class="checkbox-row full settings-model-default-row">
             <input v-model="modelDraft.is_active" type="checkbox" />
             <span>{{ t("modelSettings.set_as_default") }}</span>
           </label>
+          </div>
         </div>
 
         <div class="settings-modal-actions">
@@ -917,44 +927,134 @@ async function deleteModel(item: ModelConfigPublic) {
 </template>
 
 <style scoped>
-/* ── Auth type switch buttons ── */
-.settings-auth-type-row {
+.settings-model-editor-modal {
+  width: min(700px, calc(100vw - 40px));
+  max-height: min(820px, calc(100vh - 40px));
+  padding: 0;
+  overflow: hidden;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  border-radius: 10px;
+}
+
+.settings-model-editor-modal .settings-modal-head {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 22px 24px 18px;
+  border-bottom: 1px solid var(--border);
+}
+
+.settings-model-editor-modal .settings-modal-head h4 {
+  font-size: 17px;
+  line-height: 1.3;
+}
+
+.settings-model-editor-modal .settings-modal-head p {
+  margin-top: 2px;
+  font-size: 12px;
+}
+
+.settings-model-editor-modal .settings-modal-close {
+  flex: 0 0 auto;
+  font-size: 16px;
+}
+
+.settings-model-editor-body {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 18px 24px 20px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.35) transparent;
+}
+
+.settings-model-editor-body::-webkit-scrollbar {
+  width: 7px;
+}
+
+.settings-model-editor-body::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.32);
+}
+
+.settings-model-editor-form {
+  gap: 16px 18px;
+}
+
+.settings-model-editor-form label {
+  gap: 5px;
+}
+
+.settings-model-editor-form label > span,
+.settings-application-section__title {
   font-size: 13px;
-  color: var(--muted);
-  font-weight: 500;
+  font-weight: 600;
+}
+
+.settings-model-editor-form label small {
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.settings-model-editor-divider {
+  height: 1px;
+  margin: 2px 0 0;
+  background: var(--border);
+}
+
+.settings-model-editor-modal .settings-modal-actions {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 15px 24px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.settings-auth-type-row {
+  display: grid;
+  grid-template-columns: minmax(90px, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 6px;
+  background: var(--surface-soft);
+  font-size: 13px;
+  color: var(--text);
+  font-weight: 600;
 }
 
 .settings-auth-type-btns {
-  display: flex;
-  gap: 8px;
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--surface);
 }
 
 .settings-auth-type-btn {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 14px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
+  min-height: 30px;
+  padding: 5px 12px;
+  border-radius: 5px;
+  border: 0;
   background: transparent;
-  color: var(--text);
-  font-size: 13px;
+  color: var(--muted);
+  font-size: 12px;
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s, color 0.15s;
 }
 
 .settings-auth-type-btn:hover {
-  border-color: var(--text);
-  background: color-mix(in srgb, var(--text) 6%, transparent);
+  background: var(--surface-soft);
+  color: var(--text);
 }
 
 .settings-auth-type-btn.active {
-  border-color: var(--text);
-  background: color-mix(in srgb, var(--text) 10%, transparent);
-  color: var(--text);
+  background: var(--text);
+  color: var(--surface);
   font-weight: 600;
 }
 
@@ -1132,7 +1232,7 @@ async function deleteModel(item: ModelConfigPublic) {
 
 .settings-application-section {
   display: grid;
-  gap: 8px;
+  gap: 7px;
 }
 
 .settings-application-section__title {
@@ -1144,14 +1244,28 @@ async function deleteModel(item: ModelConfigPublic) {
 .settings-application-options {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  gap: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 6px;
 }
 
 .settings-application-option {
   align-items: flex-start;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 9px 10px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 0;
+  border-radius: 0;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.settings-application-option + .settings-application-option {
+  border-left: 1px solid var(--border);
+}
+
+.settings-application-option:hover {
+  background: var(--surface-soft);
 }
 
 .settings-application-option span {
@@ -1165,9 +1279,67 @@ async function deleteModel(item: ModelConfigPublic) {
   line-height: 1.45;
 }
 
+.settings-model-default-row {
+  width: fit-content;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.settings-model-default-row span {
+  font-size: 12px !important;
+  font-weight: 500 !important;
+}
+
 @media (max-width: 680px) {
+  .settings-modal-overlay {
+    padding: 12px;
+  }
+
+  .settings-model-editor-modal {
+    width: calc(100vw - 24px);
+    max-height: calc(100vh - 24px);
+  }
+
+  .settings-model-editor-modal .settings-modal-head {
+    padding: 18px 18px 15px;
+  }
+
+  .settings-model-editor-body {
+    padding: 16px 18px 18px;
+  }
+
+  .settings-model-editor-form {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-model-editor-form .full {
+    grid-column: auto;
+  }
+
+  .settings-auth-type-row {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-auth-type-btns {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .settings-auth-type-btn {
+    justify-content: center;
+  }
+
   .settings-application-options {
     grid-template-columns: 1fr;
+  }
+
+  .settings-application-option + .settings-application-option {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .settings-model-editor-modal .settings-modal-actions {
+    padding: 13px 18px;
   }
 }
 </style>
