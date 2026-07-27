@@ -345,7 +345,7 @@ async function doCleanupConfirm() {
           <h2 class="section-title">{{ t("settings.language_title") }}</h2>
           <p class="section-desc">{{ t("settings.system_language_desc") }}</p>
         </div>
-        <div class="list-container" style="max-width: 480px;">
+        <div class="list-container language-setting-container">
           <div class="list-item">
             <div class="list-item__icon"><i class="fa-solid fa-language"></i></div>
             <div class="list-item__content">
@@ -955,6 +955,10 @@ async function doCleanupConfirm() {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
   gap: 16px;
+}
+
+.language-setting-container {
+  max-width: 320px;
 }
 
 .list-container.vertical {
