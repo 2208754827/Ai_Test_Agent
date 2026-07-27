@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed, ref, watch, onBeforeUnmount } from "vue";
-import { NSelect, NModal } from "naive-ui";
+import { NModal } from "naive-ui";
 
+import DropdownSelect from "../../../components/common/DropdownSelect.vue";
 import { useGeneralSettingsStore, type AppFontFamily, type AppFontSize, type GeneralSettingsSnapshot } from "../../../stores/generalSettings";
 import type { SettingsPluginDefinition } from "../plugins";
 import { t } from "../../../services/i18n";
@@ -352,11 +353,11 @@ async function doCleanupConfirm() {
                 <div class="field-header">
                   <h3>{{ t("settings.system_language") }}</h3>
                 </div>
-                <n-select
-                  v-model:value="draft.language"
-                  filterable
-                  size="medium"
+                <DropdownSelect
+                  v-model="draft.language"
                   :options="languageOptions"
+                  button-class="settings-provider-select"
+                  menu-class="settings-provider-select-menu"
                   placeholder=""
                 />
               </label>

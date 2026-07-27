@@ -89,6 +89,11 @@ body,
   min-height: 100%;
 }
 
+#app {
+  width: 100%;
+  min-height: 100%;
+}
+
 body {
   background: var(--bg);
   color: var(--text);
@@ -99,13 +104,141 @@ body {
 }
 
 /* Naive-ui teleports popups (dropdowns, dialogs, tooltips) to body level.
-   Ensure those detached layers still follow the global app font family. */
+   Keep their coordinate space unscaled, then scale menu content to match #app. */
 .n-config-provider,
 .v-binder-follower-container,
 .n-modal-container,
 .n-notification-container,
 .n-message-container {
   font-family: var(--app-font-family);
+}
+
+.n-dropdown-menu,
+.n-base-select-menu {
+  zoom: var(--app-font-size-scale, 1);
+}
+
+.dropdown-select-button {
+  width: 100%;
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1;
+  cursor: pointer;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease, background-color 0.2s ease;
+}
+
+.dropdown-select-button:hover:not(:disabled) {
+  border-color: var(--text);
+  background: var(--surface-soft);
+}
+
+.dropdown-select-button:focus-visible {
+  outline: none;
+  border-color: var(--text);
+  box-shadow: 0 0 0 1px var(--text);
+}
+
+.dropdown-select-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.dropdown-select-button.is-placeholder .dropdown-select-label {
+  color: var(--muted);
+}
+
+.dropdown-select-label {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.dropdown-select-clear,
+.dropdown-select-caret {
+  flex-shrink: 0;
+  color: var(--muted);
+}
+
+.dropdown-select-clear {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.dropdown-select-clear:hover {
+  background: var(--surface-muted);
+  color: var(--text);
+}
+
+.dropdown-select-caret {
+  font-size: 10px;
+}
+
+.app-dropdown-menu {
+  /* Keep long option lists inside the viewport after Naive UI flips placement. */
+  max-height: min(360px, calc(100dvh - 24px)) !important;
+  overflow-y: auto !important;
+  padding: 6px !important;
+  border: 1px solid var(--border) !important;
+  border-radius: 6px !important;
+  background: var(--surface) !important;
+  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.12) !important;
+}
+
+.app-dropdown-menu .n-dropdown-option {
+  margin: 0 !important;
+}
+
+.app-dropdown-menu .n-dropdown-option-body {
+  min-height: 34px !important;
+  padding: 0 10px !important;
+  border-radius: 4px !important;
+  color: var(--muted) !important;
+}
+
+.app-dropdown-menu .n-dropdown-option:not(.n-dropdown-option--disabled) .n-dropdown-option-body:hover,
+.app-dropdown-menu .n-dropdown-option:not(.n-dropdown-option--disabled).n-dropdown-option--pending .n-dropdown-option-body {
+  background: var(--surface-soft) !important;
+  color: var(--text) !important;
+}
+
+.app-dropdown-option-label {
+  width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.app-dropdown-option-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-dropdown-option-check {
+  flex-shrink: 0;
+  color: var(--text);
+  font-size: 12px;
 }
 
 button,
@@ -5442,9 +5575,17 @@ textarea {
 }
 
 .runtime-console-tabs-inline {
-  flex: 1;
-  justify-content: flex-end;
+  flex: 1 1 auto;
+  min-width: 0;
+  justify-content: flex-start;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  overflow-y: hidden;
   margin: 0;
+}
+
+.runtime-console-tabs-inline .runtime-console-tab {
+  flex-shrink: 0;
 }
 
 .runtime-console-tab {

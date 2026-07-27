@@ -129,12 +129,11 @@ function applySettingsToDocument(settings: GeneralSettingsSnapshot) {
   root.dataset.reduceMotion = settings.reduceMotion ? "true" : "false";
   root.style.setProperty("--app-font-family", fontFamilyMap[settings.fontFamily]);
   root.style.setProperty("--app-font-size-scale", fontSizeScaleMap[settings.fontSize]);
-  // Scale the whole UI globally. Font sizes across the app are hard-coded in px,
-  // so `zoom` is the only single-point control that affects them all. Apply it to
-  // <body> (not <html>): body's unscaled parent keeps percentage heights correct,
-  // and naive-ui popups teleported into body still get scaled.
-  if (document.body) {
-    document.body.style.setProperty("zoom", fontSizeScaleMap[settings.fontSize]);
+  // Scale the application content while leaving body unscaled. Naive UI teleports
+  // popups into body and needs that unscaled coordinate space for correct placement.
+  const appRoot = document.getElementById("app");
+  if (appRoot) {
+    appRoot.style.setProperty("zoom", fontSizeScaleMap[settings.fontSize]);
   }
   // Sync i18n locale.
   setLocale(settings.language);
@@ -224,9 +223,10 @@ export const useGeneralSettingsStore = defineStore("generalSettings", {
       root.dataset.reduceMotion = patch.reduceMotion ? "true" : "false";
       root.style.setProperty("--app-font-family", fontFamilyMap[patch.fontFamily]);
       root.style.setProperty("--app-font-size-scale", fontSizeScaleMap[patch.fontSize]);
-      // Keep zoom target consistent with applySettingsToDocument (on <body>).
-      if (document.body) {
-        document.body.style.setProperty("zoom", fontSizeScaleMap[patch.fontSize]);
+      // Keep zoom target consistent with applySettingsToDocument (on #app).
+      const appRoot = document.getElementById("app");
+      if (appRoot) {
+        appRoot.style.setProperty("zoom", fontSizeScaleMap[patch.fontSize]);
       }
     },
 

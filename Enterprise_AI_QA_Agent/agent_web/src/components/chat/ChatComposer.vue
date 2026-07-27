@@ -288,7 +288,13 @@ function formatAttachmentSize(value: unknown) {
           :accept="ALLOWED_EXTENSIONS.join(',')"
           @change="handleFileChange"
         >
-        <n-dropdown trigger="click" placement="top-start" :options="modeOptions" @select="handleModeSelect">
+        <n-dropdown
+          trigger="click"
+          placement="top-start"
+          :options="modeOptions"
+          :menu-props="() => ({ class: 'app-dropdown-menu home-mode-menu' })"
+          @select="handleModeSelect"
+        >
           <button class="home-tool-btn home-mode-btn" type="button" :title="activeModeSummary">
             <i class="fa-solid fa-sitemap"></i>
             {{ activeModeLabel }}

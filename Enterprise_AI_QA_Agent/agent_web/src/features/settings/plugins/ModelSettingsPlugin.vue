@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onActivated, onBeforeUnmount, onDeactivated, reactive, ref, watch } from "vue";
-import { NSelect, type SelectOption } from "naive-ui";
 
+import DropdownSelect from "../../../components/common/DropdownSelect.vue";
 import { api } from "../../../services/api";
 import { t } from "../../../services/i18n";
 import type {
@@ -14,8 +14,9 @@ import type {
 } from "../../../types";
 
 type MessageTone = "success" | "error";
+type DropdownSelectOption = { label: string; value: string; disabled?: boolean };
 
-const TRANSPORT_OPTIONS: SelectOption[] = [
+const TRANSPORT_OPTIONS: DropdownSelectOption[] = [
   { label: "OpenAI Chat Completions", value: "openai_chat_completions" },
   { label: "OpenAI Responses", value: "openai_responses" },
   { label: "Anthropic Messages", value: "anthropic_messages" },
@@ -95,7 +96,7 @@ const selectedOAuthProfile = computed<OAuthProviderProfile | null>(() => {
   return oauthProviders.value.find((p) => p.key === modelDraft.oauth_provider) ?? null;
 });
 
-const oauthProviderOptions = computed<SelectOption[]>(() =>
+const oauthProviderOptions = computed<DropdownSelectOption[]>(() =>
   oauthProviders.value.map((p) => ({
     label: p.is_enabled ? p.display_name : `${p.display_name}（${t("modelSettings.coming_soon")}）`,
     value: p.key,
@@ -103,7 +104,7 @@ const oauthProviderOptions = computed<SelectOption[]>(() =>
   })),
 );
 
-const oauthModelOptions = computed<SelectOption[]>(() =>
+const oauthModelOptions = computed<DropdownSelectOption[]>(() =>
   oauthAvailableModels.value.map((m) => ({ label: `${m.id}  (${m.name})`, value: m.id })),
 );
 
@@ -698,9 +699,9 @@ async function deleteModel(item: ModelConfigPublic) {
 
             <label class="settings-provider-field">
               <span>{{ t("modelSettings.transport") }}</span>
-              <NSelect
-                v-model:value="modelDraft.transport"
-                class="settings-provider-select"
+              <DropdownSelect
+                v-model="modelDraft.transport"
+                button-class="settings-provider-select"
                 menu-class="settings-provider-select-menu"
                 :options="TRANSPORT_OPTIONS"
                 :placeholder="t('modelSettings.transport_ph')"
@@ -724,14 +725,14 @@ async function deleteModel(item: ModelConfigPublic) {
             <!-- Step 1: Provider -->
             <label class="full settings-provider-field">
               <span>{{ t("modelSettings.oauth_provider") }}</span>
-              <NSelect
-                v-model:value="modelDraft.oauth_provider"
-                class="settings-provider-select"
+              <DropdownSelect
+                :model-value="modelDraft.oauth_provider"
+                button-class="settings-provider-select"
                 menu-class="settings-provider-select-menu"
                 :options="oauthProviderOptions"
                 :placeholder="t('modelSettings.oauth_provider_ph')"
                 clearable
-                @update:value="onOAuthProviderChange"
+                @update:model-value="(value) => { modelDraft.oauth_provider = value ? String(value) : null; onOAuthProviderChange(modelDraft.oauth_provider); }"
               />
               <small v-if="selectedOAuthProfile?.notes" class="oauth-provider-note">
                 {{ selectedOAuthProfile.notes }}
@@ -825,16 +826,15 @@ async function deleteModel(item: ModelConfigPublic) {
                   {{ oauthModelsFetching ? t("modelSettings.oauth_fetching") : t("modelSettings.oauth_fetch_models") }}
                 </button>
 
-                <NSelect
+                <DropdownSelect
                   v-if="oauthAvailableModels.length > 0"
-                  :value="oauthSelectedModelId"
-                  class="settings-provider-select oauth-model-select"
+                  :model-value="oauthSelectedModelId"
+                  button-class="settings-provider-select oauth-model-select"
                   menu-class="settings-provider-select-menu"
                   :options="oauthModelOptions"
                   :placeholder="t('modelSettings.oauth_fetch_available_models')"
-                  filterable
                   clearable
-                  @update:value="onOAuthModelSelect"
+                  @update:model-value="(value) => onOAuthModelSelect(value ? String(value) : null)"
                 />
               </div>
 
