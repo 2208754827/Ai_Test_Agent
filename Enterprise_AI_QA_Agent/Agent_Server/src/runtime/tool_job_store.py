@@ -13,6 +13,7 @@ class ToolJobStore(Protocol):
     async def get_job(self, job_id: str) -> ToolJobRecord | None: ...
     async def list_jobs(self, session_id: str | None = None) -> list[ToolJobRecord]: ...
     async def save_artifact(self, artifact: ToolArtifactRecord) -> ToolArtifactRecord: ...
+    async def get_artifact(self, artifact_id: str) -> ToolArtifactRecord | None: ...
     async def list_artifacts(
         self,
         session_id: str | None = None,
@@ -53,6 +54,9 @@ class InMemoryToolJobStore:
         async with self._lock:
             self._artifacts[artifact.id] = artifact
             return artifact
+
+    async def get_artifact(self, artifact_id: str) -> ToolArtifactRecord | None:
+        return self._artifacts.get(artifact_id)
 
     async def list_artifacts(
         self,

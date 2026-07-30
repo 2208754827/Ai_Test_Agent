@@ -693,6 +693,72 @@ class ToolRegistry:
                 ),
                 handler_key="file-artifact-manager",
             ),
+            "test-case-xlsx-exporter": ToolModule(
+                descriptor=ToolDescriptor(
+                    key="test-case-xlsx-exporter",
+                    name="Test Case XLSX Exporter",
+                    description=(
+                        "Export structured test cases to an xlsx (Excel) file for download. "
+                        "Call this after generating test cases with the test-case-generator tool "
+                        "to provide a downloadable spreadsheet. The generated xlsx file will include "
+                        "columns for ID, title, type, priority, platforms, preconditions, steps, "
+                        "expected results, assertions, and risk focus."
+                    ),
+                    category="qa",
+                    permission_level="safe",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "cases": {
+                                "type": "array",
+                                "description": "Array of test case objects to export. Each case should have id, title, type, priority, and steps.",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {"type": "string", "description": "Test case ID, e.g. TC-001."},
+                                        "title": {"type": "string", "description": "Test case title."},
+                                        "type": {"type": "string", "description": "Test case type, e.g. functional, security."},
+                                        "priority": {"type": "string", "description": "Priority level: high, medium, low."},
+                                        "platforms": {"type": "array", "items": {"type": "string"}, "description": "Target platforms."},
+                                        "preconditions": {"type": "array", "items": {"type": "string"}, "description": "Preconditions for the test case."},
+                                        "steps": {
+                                            "type": "array",
+                                            "items": {
+                                                "type": "object",
+                                                "properties": {
+                                                    "step": {"type": "integer"},
+                                                    "action": {"type": "string"},
+                                                    "expected": {"type": "string"},
+                                                },
+                                            },
+                                            "description": "Test steps with action and expected result.",
+                                        },
+                                        "assertions": {"type": "array", "items": {"type": "string"}, "description": "Assertions or acceptance criteria."},
+                                        "risk_focus": {"type": "array", "items": {"type": "string"}, "description": "Risk focus areas."},
+                                    },
+                                },
+                            },
+                            "feature": {
+                                "type": "string",
+                                "description": "Feature name for the xlsx filename. Used to label the exported file.",
+                            },
+                        },
+                        "required": ["cases"],
+                    },
+                    output_schema={
+                        "ok": "boolean",
+                        "summary": "string",
+                        "artifact_path": "string",
+                        "case_count": "integer",
+                        "download_urls": "array",
+                        "artifacts": "array",
+                        "metrics": "object",
+                        "error": "string",
+                    },
+                    tags=["qa", "export", "xlsx"],
+                ),
+                handler_key="test-case-xlsx-exporter",
+            ),
             "report-writer": ToolModule(
                 descriptor=ToolDescriptor(
                     key="report-writer",

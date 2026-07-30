@@ -1,8 +1,22 @@
 from __future__ import annotations
 
+import re
+
 from src.graph.state import AgentGraphState
 from src.application.security.output_safety_policy import OutputSafetyPolicy
 from src.runtime.execution_logging import append_graph_event, truncate_text
+
+# Pattern matching bare artifact download URLs that the LLM may output as
+# plain text instead of markdown links.  The responder converts these into
+# proper markdown links so the frontend can render clickable download buttons.
+# Negative lookbehind for `](` ensures we don't double-wrap URLs that are
+# already part of a markdown link like `[text](url)`.
+_ARTIFACT_URL_RE = re.compile(
+    r"(?<!\]\()"                                      # not preceded by ](markdown link)
+    r"(/api/v1/sessions/[a-f0-9-]+/artifacts/[a-f0-9-]+/content)"
+    r"(?!\))",                                         # not followed by )(end of markdown link)
+    re.IGNORECASE,
+)
 
 
 def responder(state: AgentGraphState) -> AgentGraphState:
@@ -23,6 +37,13 @@ def responder(state: AgentGraphState) -> AgentGraphState:
     )
 
     sanitized_response, redacted = OutputSafetyPolicy().sanitize_text(state["final_response"].strip())
+
+    # Convert bare artifact download URLs to markdown links so the frontend
+    # renders them as clickable download buttons.  The LLM (especially
+    # GLM-5.1) often outputs the URL as plain text despite SKILL.md
+    # instructions, so we enforce the correct format here.
+    sanitized_response = _linkify_artifact_urls(sanitized_response)
+
     state["final_response"] = sanitized_response
     append_graph_event(
         state,
@@ -45,3 +66,18 @@ def responder(state: AgentGraphState) -> AgentGraphState:
         response_preview=truncate_text(state["final_response"], 180),
     )
     return state
+
+
+def _linkify_artifact_urls(text: str) -> str:
+    """Convert bare artifact download URLs to markdown links.
+
+    If the LLM outputs a URL like
+        /api/v1/sessions/{id}/artifacts/{id}/content
+    as plain text (not already inside a markdown link), this function wraps
+    it into ``[⬇ 点击下载]({url})`` so the frontend renders a clickable
+    download button.
+    """
+    def _replace(match: re.Match) -> str:
+        url = match.group(1)
+        return f"[⬇ 点击下载]({url})"
+    return _ARTIFACT_URL_RE.sub(_replace, text)

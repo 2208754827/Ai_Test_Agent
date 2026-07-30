@@ -849,7 +849,13 @@ def _validate_tool_input(schema: dict[str, Any], arguments: dict[str, Any]) -> l
     errors: list[str] = []
     properties = dict(schema.get("properties") or {})
     for key in schema.get("required") or []:
-        if key not in arguments or arguments.get(key) is None or arguments.get(key) == "" or arguments.get(key) == []:
+        val = arguments.get(key)
+        # Treat as missing only when the key is truly absent, None, or "".
+        # Empty arrays/lists are allowed — the tool handler is responsible for
+        # returning a meaningful error (e.g. "no cases provided") that the LLM
+        # can act on, rather than a generic "invalid arguments" that blocks the
+        # tool call entirely.
+        if key not in arguments or val is None or val == "":
             errors.append(f"Missing required field: {key}")
     for key, value in arguments.items():
         rule = properties.get(key)
@@ -898,6 +904,11 @@ def _build_unknown_tool_output(state: AgentGraphState, requested_name: str) -> d
     suggested_tools = _suggest_tool_names(requested_name, model_visible_tools)
     skill_match = skill_catalog.get(requested_name)
 
+    # Build a strong hint when a visible tool name is similar to the requested one.
+    similar_hint = ""
+    if suggested_tools and suggested_tools[0] != "skill":
+        similar_hint = f" Did you mean '{suggested_tools[0]}'? Do NOT invent tool names."
+
     if skill_match is not None:
         return {
             "error": "unknown_tool",
@@ -907,6 +918,7 @@ def _build_unknown_tool_output(state: AgentGraphState, requested_name: str) -> d
             "summary": (
                 f"'{requested_name}' is a skill, not a callable tool. "
                 "Call the registered 'skill' tool with this key to load it."
+                + similar_hint
             ),
             "suggested_tools": suggested_tools,
             "model_visible_tools": model_visible_tools,
@@ -916,12 +928,32 @@ def _build_unknown_tool_output(state: AgentGraphState, requested_name: str) -> d
         "error": "unknown_tool",
         "error_kind": "unregistered_tool_name",
         "requested_tool": requested_name,
-        "summary": f"Model requested unknown tool '{requested_name}'.",
+        "summary": (
+            f"Model requested unknown tool '{requested_name}'."
+            f" This tool does not exist."
+            + similar_hint
+        ),
         "suggested_tools": suggested_tools,
         "model_visible_tools": model_visible_tools,
     }
 
 
 def _suggest_tool_names(requested_name: str, model_visible_tools: list[str]) -> list[str]:
-    del requested_name
-    return list(dict.fromkeys(["skill", *model_visible_tools]))[:8]
+    """Suggest tools the model should call instead of the unknown name.
+
+    Prioritises tools whose name is similar to the requested name (shared
+    keywords or small edit distance) so the LLM gets a strong hint about the
+    correct tool to call.
+    """
+    def _similarity(a: str, b: str) -> int:
+        """Rough similarity score: shared hyphen-separated tokens."""
+        tokens_a = set(a.lower().replace("-", " ").split())
+        tokens_b = set(b.lower().replace("-", " ").split())
+        return len(tokens_a & tokens_b)
+
+    scored = [(tool, _similarity(requested_name, tool)) for tool in model_visible_tools]
+    scored.sort(key=lambda pair: pair[1], reverse=True)
+    similar = [tool for tool, score in scored if score > 0]
+    rest = [tool for tool, score in scored if score == 0]
+    ordered = list(dict.fromkeys(["skill", *similar, *rest]))[:8]
+    return ordered

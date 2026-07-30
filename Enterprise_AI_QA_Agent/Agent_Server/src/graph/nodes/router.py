@@ -49,6 +49,13 @@ def build_router_node(
             for skill in skill_registry.get_many(resolved_skills)
             for tool_key in skill.tool_keys
         ]
+        # Auto-expose tools from the agent's supported_skills so they are
+        # visible on the first model turn without requiring a `skill` loader call.
+        agent_skill_tools = [
+            tool_key
+            for skill in skill_registry.get_many(agent.supported_skills)
+            for tool_key in skill.tool_keys
+        ]
         context_bundle = dict(state.get("context_bundle") or {})
         required_capabilities = [
             str(item).strip()
@@ -79,7 +86,7 @@ def build_router_node(
             capability for capability in allowed_capabilities if capability not in denied_capabilities
         ]
         restrict_tool_expansion = "do_not_expand_tool_access" in safety_assessment.get("restrictions", [])
-        initial_tool_keys = list(dict.fromkeys(["skill", *loaded_skill_tools]))
+        initial_tool_keys = list(dict.fromkeys(["skill", *loaded_skill_tools, *agent_skill_tools]))
         tools = capability_resolver.eligible_tools(
             tools=tool_registry.get_many(initial_tool_keys),
             active_mode_key=state["mode_key"],

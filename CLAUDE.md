@@ -34,5 +34,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 最近变更索引
 
 <!-- RECENT_INDEX_START -->
+- 2026-07-30 修复 xlsx artifact 下载 500 + Content-Disposition/MIME type + tool 参数验证误拒空数组 -> 详见 [decisions/2026-07-30-xlsx-download-fix.md](docs/decisions/2026-07-30-xlsx-download-fix.md)
 - 2026-07-29 编写一键启停脚本 start_all.py 并初始化架构导航三层结构 -> 详见 [decisions/2026-07-29-start_all-and-claudemd.md](docs/decisions/2026-07-29-start_all-and-claudemd.md)
 <!-- RECENT_INDEX_END -->

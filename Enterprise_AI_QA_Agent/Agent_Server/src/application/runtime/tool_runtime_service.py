@@ -201,6 +201,7 @@ class ToolRuntimeService:
             "api-tester": self._run_api_tester,
             "cli-executor": self._run_cli_executor,
             "file-artifact-manager": self._run_file_artifact_manager,
+            "test-case-xlsx-exporter": self._run_test_case_xlsx_exporter,
             "report-writer": self._run_report_writer,
             "project-source-loader": self._run_project_source_loader,
             "project-tree-scanner": self._run_project_tree_scanner,
@@ -399,6 +400,31 @@ class ToolRuntimeService:
                         artifacts=result.get("artifacts", []) if isinstance(result, dict) else [],
                     )
             record_output = self._compact_tool_output_for_model(tool.key, result)
+            # Inject download URLs for saved artifacts so the LLM can reference
+            # them in its response as clickable markdown links.
+            if job is not None and self._tool_job_service is not None and resolved_status == "completed":
+                saved_artifacts = await self._tool_job_service.list_artifacts(tool_job_id=job.id)
+                if saved_artifacts:
+                    download_urls = []
+                    for artifact in saved_artifacts:
+                        url = f"/api/v1/sessions/{context.session_id}/artifacts/{artifact.id}/content"
+                        download_urls.append({
+                            "artifact_id": artifact.id,
+                            "label": artifact.label or artifact.path,
+                            "artifact_type": artifact.artifact_type,
+                            "url": url,
+                        })
+                    if download_urls:
+                        record_output["download_urls"] = download_urls
+                        # Provide a pre-formatted markdown link string so the LLM
+                        # can copy it verbatim instead of inventing its own format.
+                        # This dramatically increases the chance the frontend renders
+                        # a clickable download button.
+                        md_links = [
+                            f"[点击下载 {du['label']}]({du['url']})"
+                            for du in download_urls
+                        ]
+                        record_output["download_markdown"] = "\n".join(md_links)
             return ToolExecutionRecord(
                 call_id=call.id,
                 tool_key=tool.key,
@@ -1505,6 +1531,140 @@ class ToolRuntimeService:
             arguments,
             asdict(context),
         )
+
+    async def _run_test_case_xlsx_exporter(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> dict[str, Any]:
+        """Export structured test cases to an xlsx file for download.
+
+        Harness compliance (§4.3 Tool Harness):
+        - Tool ID: test-case-xlsx-exporter
+        - Permission: safe (writes to local artifact dir only)
+        - Error codes: missing_cases, xlsx_generation_failed
+        - Audit: ToolJobService records input/output/status automatically
+        """
+        cases = arguments.get("cases") or []
+        feature = str(arguments.get("feature") or "test_cases").strip()
+
+        if not cases:
+            return {
+                "status": "failed",
+                "ok": False,
+                "summary": "No test cases provided for xlsx export.",
+                "cases": [],
+                "artifacts": [],
+                "metrics": {"case_count": 0},
+                "error": "missing_cases",
+            }
+
+        try:
+            from openpyxl import Workbook
+            from openpyxl.styles import Alignment, Font, PatternFill
+        except ImportError:
+            return {
+                "status": "failed",
+                "ok": False,
+                "summary": "openpyxl is not installed. Cannot generate xlsx export.",
+                "cases": [],
+                "artifacts": [],
+                "metrics": {"case_count": len(cases)},
+                "error": "xlsx_generation_failed",
+            }
+
+        try:
+            wb = Workbook()
+            ws = wb.active
+            ws.title = "Test Cases"
+
+            # Header row with styling
+            headers = [
+                "ID", "Title", "Type", "Priority", "Platforms",
+                "Preconditions", "Steps", "Expected Results",
+                "Assertions", "Risk Focus",
+            ]
+            header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+            header_font = Font(bold=True, color="FFFFFF")
+            for col, header in enumerate(headers, 1):
+                cell = ws.cell(row=1, column=col, value=header)
+                cell.font = header_font
+                cell.fill = header_fill
+                cell.alignment = Alignment(horizontal="center")
+
+            # Data rows
+            for case in cases:
+                steps = case.get("steps", [])
+                steps_text = "\n".join(
+                    f"{s.get('step', i + 1)}. {s.get('action', '')}"
+                    for i, s in enumerate(steps)
+                )
+                expected_text = "\n".join(
+                    s.get("expected", "")
+                    for s in steps
+                    if s.get("expected")
+                )
+                ws.append([
+                    case.get("id", ""),
+                    case.get("title", ""),
+                    case.get("type", ""),
+                    case.get("priority", ""),
+                    ", ".join(case.get("platforms", [])),
+                    "\n".join(case.get("preconditions", [])),
+                    steps_text,
+                    expected_text,
+                    "\n".join(case.get("assertions", [])),
+                    ", ".join(case.get("risk_focus", [])),
+                ])
+
+            # Auto-adjust column widths
+            for col in ws.columns:
+                max_length = max(len(str(cell.value or "")) for cell in col)
+                ws.column_dimensions[col[0].column_letter].width = min(max_length + 2, 50)
+
+            # Save to artifact directory
+            artifact_dir = self._prepare_local_artifact_dir(context, "test-case-xlsx-exporter")
+            safe_feature = "".join(c if c.isalnum() or c in "-_" else "_" for c in feature)[:30]
+            xlsx_path = artifact_dir / f"{safe_feature}_test_cases.xlsx"
+            wb.save(str(xlsx_path))
+
+            # Verification: confirm file was written
+            if not xlsx_path.exists():
+                return {
+                    "status": "failed",
+                    "ok": False,
+                    "summary": f"xlsx file was not created at expected path: {xlsx_path.name}",
+                    "artifacts": [],
+                    "metrics": {"case_count": len(cases)},
+                    "error": "xlsx_generation_failed",
+                }
+
+            return {
+                "status": "completed",
+                "ok": True,
+                "summary": f"Exported {len(cases)} test cases to xlsx file '{xlsx_path.name}'.",
+                "artifact_path": str(xlsx_path),
+                "case_count": len(cases),
+                "artifacts": [
+                    {
+                        "type": "test_cases_xlsx",
+                        "label": xlsx_path.name,
+                        "path": str(xlsx_path),
+                    }
+                ],
+                "metrics": {
+                    "case_count": len(cases),
+                },
+            }
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "ok": False,
+                "summary": f"Failed to generate xlsx export: {exc}",
+                "artifacts": [],
+                "metrics": {"case_count": len(cases)},
+                "error": "xlsx_generation_failed",
+            }
 
     async def _deliver_security_testing_report(
         self,

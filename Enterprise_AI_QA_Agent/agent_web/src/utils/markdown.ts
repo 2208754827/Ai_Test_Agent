@@ -48,7 +48,7 @@ md.use(texmath, {
   katexOptions: { throwOnError: false, errorColor: "#ef4444" },
 });
 
-// Open links in a new tab safely.
+// Render /api/v1/sessions/.../artifacts/.../content links as clickable download buttons.
 const defaultLinkRender =
   md.renderer.rules.link_open ||
   ((tokens, idx, options, _env, self) => self.renderToken(tokens, idx, options));
@@ -59,8 +59,98 @@ md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
     token.attrSet("target", "_blank");
     token.attrSet("rel", "noreferrer noopener");
   }
+  // Artifact download links: add download attribute so the browser downloads
+  // the file instead of navigating to it, and add a visual indicator class.
+  if (/^\/api\/v1\/sessions\/[^/]+\/artifacts\//i.test(href)) {
+    token.attrSet("download", "");
+    token.attrSet("class", "artifact-download-link");
+  }
   return defaultLinkRender(tokens, idx, options, env, self);
 };
+
+/**
+ * Custom markdown-it plugin: auto-link bare artifact download URLs.
+ *
+ * markdown-it's built-in `linkify` only handles full URLs (http://, https://).
+ * Artifact download URLs are relative paths like
+ *   /api/v1/sessions/{id}/artifacts/{id}/content
+ * which linkify ignores. This plugin detects such bare paths in text tokens
+ * and wraps them in markdown link tokens so they render as clickable links
+ * (and get the `artifact-download-link` class from the link_open rule above).
+ */
+function artifactAutoLink(md: MarkdownIt): void {
+  const ARTIFACT_RE = /(^|[\s(：:])(\/api\/v1\/sessions\/[a-f0-9-]+\/artifacts\/[a-f0-9-]+\/content)(?=[\s).,;:!\?？。”》、]|$)/gi;
+
+  md.core.ruler.push("artifact_auto_link", (state) => {
+    // Obtain the Token constructor from an existing token (markdown-it does
+    // not expose it as a static property on the instance or core namespace).
+    const TokenCtor = state.tokens[0]?.constructor as any;
+
+    for (const token of state.tokens) {
+      if (token.type !== "inline") continue;
+      const children = token.children;
+      if (!children) continue;
+
+      const newChildren: MarkdownIt.Token[] = [];
+      for (const child of children) {
+        if (child.type !== "text") {
+          newChildren.push(child);
+          continue;
+        }
+        const text = child.content;
+        if (!ARTIFACT_RE.test(text)) {
+          newChildren.push(child);
+          continue;
+        }
+        ARTIFACT_RE.lastIndex = 0;
+        let lastIndex = 0;
+        let match: RegExpExecArray | null;
+        while ((match = ARTIFACT_RE.exec(text)) !== null) {
+          const prefix = match[1]; // whitespace or punctuation before the URL
+          const url = match[2];
+          const matchStart = match.index;
+          const urlStart = matchStart + prefix.length;
+
+          // Text before the match (if any)
+          if (urlStart > lastIndex) {
+            const before = text.slice(lastIndex, urlStart);
+            const beforeToken = new TokenCtor("text", "", 0);
+            beforeToken.content = before;
+            newChildren.push(beforeToken);
+          }
+
+          // Create link_open token
+          const linkOpen = new TokenCtor("link_open", "a", 1);
+          linkOpen.attrSet("href", url);
+          linkOpen.attrSet("download", "");
+          linkOpen.attrSet("class", "artifact-download-link");
+          newChildren.push(linkOpen);
+
+          // Create text token with the URL as visible label
+          const linkText = new TokenCtor("text", "", 0);
+          linkText.content = url;
+          newChildren.push(linkText);
+
+          // Create link_close token
+          const linkClose = new TokenCtor("link_close", "a", -1);
+          newChildren.push(linkClose);
+
+          lastIndex = matchStart + match[0].length;
+        }
+        // Remaining text after the last match
+        if (lastIndex < text.length) {
+          const after = text.slice(lastIndex);
+          const afterToken = new TokenCtor("text", "", 0);
+          afterToken.content = after;
+          newChildren.push(afterToken);
+        }
+      }
+      token.children = newChildren;
+    }
+  });
+}
+
+md.use(artifactAutoLink);
 
 /** Strip the internal framework marker before rendering. */
 export function displayAssistantContent(content: string): string {
