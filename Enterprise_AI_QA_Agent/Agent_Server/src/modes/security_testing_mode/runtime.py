@@ -18,6 +18,7 @@ from src.application.reporting.report_template_service import ReportTemplateServ
 from src.application.security.execution_monitor import SecurityExecutionMonitor
 from src.application.security.finding_normalizer import FindingNormalizer
 from src.application.security.risk_policy import SecurityRiskPolicy
+from src.application.security.target_guard import SecurityTargetGuard
 from src.application.security.tool_catalog import SecurityToolCatalog
 from src.modes.security_testing_mode.agent import (
     SECURITY_FAILURE_ANALYST_KEY,
@@ -59,6 +60,10 @@ from src.modes.security_testing_mode.contracts import (
 from src.modes.security_testing_mode.evidence_service import SecurityEvidenceService
 from src.modes.security_testing_mode.evaluation import SecurityTestingEvaluationPolicy
 from src.modes.security_testing_mode.memory_service import SecurityMemoryService
+from src.modes.security_testing_mode.output_compaction import (
+    DEFAULT_THRESHOLD_BYTES,
+    compact_security_output,
+)
 from src.modes.security_testing_mode.recon_planner import SecurityReconPlanner
 from src.modes.security_testing_mode.reflection_service import SecurityReflectionService
 from src.modes.security_testing_mode.report_builder import SecurityReportBuilder
@@ -103,6 +108,11 @@ class SecurityTestingModeRuntime:
         self._tool_catalog = SecurityToolCatalog()
         self._risk_policy = SecurityRiskPolicy()
         self._execution_monitor = SecurityExecutionMonitor()
+        self._target_guard = SecurityTargetGuard(settings)
+        self._output_summary_threshold_bytes = int(
+            getattr(settings, "security_runner_output_summary_threshold_bytes", DEFAULT_THRESHOLD_BYTES)
+            or DEFAULT_THRESHOLD_BYTES
+        )
         self._finding_normalizer = FindingNormalizer()
         self._severity_evaluator = SeverityEvaluator()
         self._verification_policy = SecurityTestingVerificationPolicy()
@@ -326,6 +336,10 @@ class SecurityTestingModeRuntime:
                 max_workers=state.campaign.max_workers,
                 worker_model_key=str(getattr(context, "selected_model_key", "") or "") or None,
                 checkpoint_callback=self._build_checkpoint_callback(state, context),
+                target_guard=self._target_guard,
+                execution_monitor=self._execution_monitor,
+                runner_lookup=self._tool_catalog.resolve_runner_for_family,
+                output_summary_threshold_bytes=self._output_summary_threshold_bytes,
             )
             completed_tasks = await coordinator.run_all()
             state.campaign.activities.extend(coordinator.activities)
@@ -725,6 +739,8 @@ class SecurityTestingModeRuntime:
             if not ready:
                 break
             for task in ready:
+                if self._reject_local_task_out_of_scope(task, pool, campaign, checkpoint_callback):
+                    continue
                 task.worker_agent_key = task.worker_agent_key or resolve_security_worker_agent(
                     surface_type=task.surface_type,
                     tool_family=task.tool_family,
@@ -737,7 +753,10 @@ class SecurityTestingModeRuntime:
                 started_at = task.started_at
                 runner_key = self._tool_catalog.resolve_runner_for_family(task.tool_family)
                 result = await self._execute_task_with_runner(task, context, runner_key)
-                task.raw_output = str(result.get("raw_output") or "")[:10000]
+                task.raw_output = compact_security_output(
+                    str(result.get("raw_output") or ""),
+                    max_bytes=self._output_summary_threshold_bytes,
+                )
                 task.parsed_result = result.get("parsed_result") if isinstance(result.get("parsed_result"), dict) else {}
                 task.result_summary = str(result.get("summary") or "")
                 task.artifacts = [
@@ -779,6 +798,50 @@ class SecurityTestingModeRuntime:
                 self._evidence_service.record_runner_result(campaign, task, result, started_at=started_at)
                 self._record_local_activity(task, started_at, campaign=campaign)
         return pool.all_tasks
+
+    def _reject_local_task_out_of_scope(
+        self,
+        task: SecurityTask,
+        pool: SecurityTaskPool,
+        campaign: SecurityCampaign,
+        checkpoint_callback: Callable[[str, SecurityTask, list[SecurityTask]], None] | None,
+    ) -> bool:
+        """S6 pre-execution allowlist gate for the local fallback path.
+
+        Mirrors the coordinator's pre-dispatch gate so both execution
+        strategies refuse out-of-scope targets identically. The execute()-level
+        gate is still the last line of defense for worker-crafted commands.
+        """
+        result = self._target_guard.evaluate_target(task.target)
+        if result.ok:
+            if getattr(result, "warn_public", False) and result.reason:
+                logger.warning(
+                    "security target allowlist warning (local): task=%s %s",
+                    task.task_id,
+                    result.reason,
+                )
+            return False
+        logger.warning(
+            "security target rejected before local execution: task=%s target=%s reason=%s",
+            task.task_id,
+            task.target,
+            result.reason,
+        )
+        task.failure_analysis = {
+            "failure_category": "target_not_allowed",
+            "root_cause": result.reason,
+            "retryable": False,
+            "suggested_fix": (
+                "Add the target to security_target_allowlist or retest an in-scope target."
+            ),
+            "alternative_profile": "",
+            "notes": f"target={task.target}",
+        }
+        task.max_retries = 0
+        pool.mark_failed(task.task_id, f"target_not_allowed: {result.reason}")
+        if checkpoint_callback is not None:
+            checkpoint_callback("task_failed", task, pool.all_tasks)
+        return True
 
     async def _execute_task_with_runner(
         self,

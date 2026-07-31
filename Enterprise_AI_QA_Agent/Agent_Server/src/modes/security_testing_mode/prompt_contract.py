@@ -139,10 +139,20 @@ def build_security_worker_prompt(
     *,
     agent_key: str,
     runner_args: dict[str, object],
+    directives: list[str] | None = None,
 ) -> str:
     role_guidance = WORKER_ROLE_GUIDANCE.get(agent_key, WORKER_ROLE_GUIDANCE[SECURITY_RECON_WORKER_KEY])
+    directive_block = ""
+    if directives:
+        joined = "\n".join(f"- {item}" for item in directives if item)
+        if joined:
+            directive_block = (
+                "\n\nPRIORITY DIRECTIVES (scheduler feedback, read first):\n"
+                f"{joined}\n"
+            )
     return (
-        f"{SECURITY_WORKER_EXECUTION_CONTRACT}\n\n"
+        f"{SECURITY_WORKER_EXECUTION_CONTRACT}\n"
+        f"{directive_block}\n"
         "Role-specific guidance:\n"
         f"- Assigned worker: {agent_key}\n"
         f"- Specialization: {role_guidance}\n\n"

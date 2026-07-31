@@ -168,6 +168,9 @@ class SecurityTask(BaseModel):
     # Runtime-managed fields
     status: str = "pending"
     attempts: int = 0
+    # S2 scheduling-loop bookkeeping.
+    reflect_attempts: int = 0  # times the Reflector re-sent this task for structured output
+    refine_origin: str = ""  # id/label of the refinement pass that produced this task
     started_at: str = ""
     completed_at: str = ""
     worker_session_id: str = ""

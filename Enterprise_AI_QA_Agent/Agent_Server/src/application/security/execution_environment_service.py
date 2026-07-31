@@ -9,6 +9,7 @@ runner.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import shlex
@@ -18,6 +19,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -59,6 +62,11 @@ class SecurityExecutionEnvironmentService:
         artifact_dir: Path,
         context: Any = None,
     ) -> SecurityCommandExecutionResult:
+        # S6 defense-in-depth: refuse commands whose high-confidence network
+        # target (URL / literal IP) falls outside the configured allowlist.
+        # The precise per-task gate lives in the coordinator; this is the last
+        # chokepoint that every worker-initiated command must pass through.
+        self._enforce_target_allowlist(command_args)
         backend = self._get_str("security_runner_backend", "SECURITY_RUNNER_BACKEND", "local").lower()
         if backend in {"docker", "container"}:
             return await asyncio.to_thread(
@@ -77,6 +85,28 @@ class SecurityExecutionEnvironmentService:
                 timeout_seconds,
             )
         raise ValueError(f"Unsupported security runner backend: {backend}")
+
+    def _enforce_target_allowlist(self, command_args: list[str]) -> None:
+        """Reject commands targeting hosts outside the allowlist (S6).
+
+        No-op when no allowlist is configured. Only high-confidence targets
+        (URLs and literal IPs) are inspected so a misparse never wrongly blocks
+        a legitimate command (``宁可漏过、不可误杀``).
+        """
+        from src.application.security.target_guard import SecurityTargetGuard
+
+        guard = SecurityTargetGuard(self._settings)
+        if not guard.has_allowlist:
+            return
+        result = guard.evaluate_command(command_args)
+        if result.ok:
+            return
+        logger.warning(
+            "security_runner target denied by allowlist: %s (hosts=%s)",
+            result.reason,
+            result.checked_hosts,
+        )
+        raise ValueError(f"security_target_allowlist_denied: {result.reason}")
 
     def _run_local(
         self,

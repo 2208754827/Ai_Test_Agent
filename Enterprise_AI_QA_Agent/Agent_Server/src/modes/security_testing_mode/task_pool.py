@@ -167,6 +167,25 @@ class SecurityTaskPool:
             if task.status == TASK_FAILED and task.attempts <= task.max_retries
         ]
 
+    def reset_for_reflect(self, task_id: str) -> bool:
+        """Return a running task to READY so the Reflector can re-dispatch it (S2).
+
+        Unlike ``reset_for_retry`` this is independent of the retry budget: the
+        Reflector loop is bounded separately by ``reflect_attempts`` on the
+        task. Worker session bookkeeping is cleared so the next dispatch starts
+        clean, but ``attempts``/``reflect_attempts`` counters are preserved.
+        """
+        task = self._tasks.get(task_id)
+        if task is None:
+            return False
+        task.status = TASK_READY
+        task.worker_status = ""
+        task.worker_session_id = ""
+        task.last_error = ""
+        task.raw_output = ""
+        task.parsed_result = {}
+        return True
+
     # ------------------------------------------------------------------
     # Summary
     # ------------------------------------------------------------------

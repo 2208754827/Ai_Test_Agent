@@ -19,6 +19,10 @@ from src.modes.security_testing_mode.contracts import (
     TASK_RUNNING,
     TOOL_EXEC_TIMEOUT_SECONDS,
 )
+from src.modes.security_testing_mode.output_compaction import (
+    DEFAULT_THRESHOLD_BYTES,
+    compact_security_output,
+)
 from src.modes.security_testing_mode.prompt_contract import build_security_worker_prompt
 from src.modes.security_testing_mode.task_pool import SecurityTaskPool
 
@@ -74,6 +78,11 @@ class SecuritySubagentCoordinator:
         worker_model_key: str | None = None,
         poll_interval_seconds: float = 0.5,
         checkpoint_callback: CheckpointCallback | None = None,
+        target_guard: Any = None,
+        execution_monitor: Any = None,
+        runner_lookup: Callable[[str], str] | None = None,
+        max_reflect_attempts: int = 3,
+        output_summary_threshold_bytes: int = DEFAULT_THRESHOLD_BYTES,
     ) -> None:
         self._pool = pool
         self._coordinator_runtime_service = coordinator_runtime_service
@@ -83,8 +92,17 @@ class SecuritySubagentCoordinator:
         self._worker_model_key = worker_model_key
         self._poll_interval_seconds = max(0.1, poll_interval_seconds)
         self._checkpoint_callback = checkpoint_callback
+        self._target_guard = target_guard
+        self._execution_monitor = execution_monitor
+        self._runner_lookup = runner_lookup
+        self._max_reflect_attempts = max(0, max_reflect_attempts)
+        self._output_summary_threshold_bytes = max(0, output_summary_threshold_bytes)
         self._activities: list[AgentActivityRecord] = []
         self._active_resource_locks: set[str] = set()
+        # Mentor state: how many times each runner family has failed so far, and
+        # the follow-up directive injected into remaining same-family tasks.
+        self._family_failure_counts: dict[str, int] = {}
+        self._mentor_directives: dict[str, str] = {}
 
     @property
     def activities(self) -> list[AgentActivityRecord]:
@@ -168,11 +186,53 @@ class SecuritySubagentCoordinator:
                 return True
         return False
 
+    def _reject_if_out_of_scope(self, task: SecurityTask) -> bool:
+        """Fail a task before dispatch when its target is outside the allowlist (S6).
+
+        Returns True when the task was rejected (and already marked failed), so
+        the caller skips dispatching it. A configured-but-empty allowlist never
+        rejects; it only logs a warning for public targets.
+        """
+        guard = self._target_guard
+        if guard is None:
+            return False
+        result = guard.evaluate_target(task.target)
+        if result.ok:
+            if getattr(result, "warn_public", False) and result.reason:
+                logger.warning(
+                    "security target allowlist warning: task=%s %s",
+                    task.task_id,
+                    result.reason,
+                )
+            return False
+        logger.warning(
+            "security target rejected before dispatch: task=%s target=%s reason=%s",
+            task.task_id,
+            task.target,
+            result.reason,
+        )
+        task.failure_analysis = {
+            "failure_category": "target_not_allowed",
+            "root_cause": result.reason,
+            "retryable": False,
+            "suggested_fix": (
+                "Add the target to security_target_allowlist or retest an in-scope target."
+            ),
+            "alternative_profile": "",
+            "notes": f"target={task.target}",
+        }
+        # An out-of-scope target will never become in-scope on retry.
+        task.max_retries = 0
+        self._fail_task(task, f"target_not_allowed: {result.reason}")
+        return True
+
     async def _dispatch_batch(self, batch: list[SecurityTask]) -> None:
         """Dispatch a batch of tasks to worker agents."""
         launched_tasks: list[SecurityTask] = []
         try:
             for task in batch:
+                if self._reject_if_out_of_scope(task):
+                    continue
                 self._pool.mark_running(task.task_id)
                 task.worker_execution_mode = "subagent_session"
                 task.worker_status = "dispatching"
@@ -180,6 +240,11 @@ class SecuritySubagentCoordinator:
                 for lock in task.resource_locks:
                     self._active_resource_locks.add(lock)
                 launched_tasks.append(task)
+
+            if not launched_tasks:
+                # Every task in this batch was rejected by the allowlist gate.
+                # Nothing to dispatch; the outer loop will settle the campaign.
+                return
 
             # Build worker specs
             workers = [self._build_worker_spec(task) for task in launched_tasks]
@@ -274,11 +339,15 @@ class SecuritySubagentCoordinator:
                     )
                 elif assistant_summary:
                     # The worker completed the conversation but did not invoke
-                    # any runner tool. We cannot treat this as a successful
-                    # security finding — there is no structured evidence to
-                    # back it. Surface this as a failed task so the campaign
-                    # report records the coverage gap.
+                    # any runner tool. Before recording a coverage gap, give the
+                    # Reflector a bounded chance to re-dispatch with an explicit
+                    # instruction to call the runner (S2).
                     task.result_summary = assistant_summary
+                    if self._maybe_reflect(task, assistant_summary):
+                        continue
+                    # We cannot treat this as a successful security finding —
+                    # there is no structured evidence to back it. Surface this
+                    # as a failed task so the campaign report records the gap.
                     task.failure_analysis = {
                         "failure_category": "no_runner_output",
                         "root_cause": (
@@ -296,10 +365,15 @@ class SecuritySubagentCoordinator:
                         f"no_runner_output: worker finished without runner evidence ({session_status_value})",
                     )
                 else:
+                    if self._maybe_reflect(task, assistant_summary):
+                        continue
                     self._fail_task(task, f"Worker finished without runner output ({session_status_value})")
 
                 # Record activity
                 self._record_activity(task, assistant_summary)
+
+            # Mentor: escalate repeatedly-failing families for this batch (S2).
+            self._apply_mentor_feedback(launched_tasks)
 
         except Exception as e:
             logger.error(f"Batch dispatch failed: {e}")
@@ -334,6 +408,7 @@ class SecuritySubagentCoordinator:
                 task,
                 agent_key=agent_key,
                 runner_args=runner_args,
+                directives=self._build_task_directives(task),
             ),
             "agent_key": agent_key,
             "model_key": self._worker_model_key,
@@ -351,6 +426,106 @@ class SecuritySubagentCoordinator:
                 "security_memory_scope": "session_only",
             },
         }
+
+    def _build_task_directives(self, task: SecurityTask) -> list[str]:
+        """Assemble scheduler feedback directives injected into the worker prompt (S2)."""
+        directives: list[str] = []
+        if task.reflect_attempts > 0:
+            runner_key = self._runner_lookup(task.tool_family) if self._runner_lookup else ""
+            directives.append(
+                "You previously finished WITHOUT invoking the assigned security runner tool. "
+                f"You MUST call the runner tool for command_profile '{task.command_profile}'"
+                + (f" (runner {runner_key})" if runner_key else "")
+                + " and return the structured JSON result (success, summary, findings, "
+                "evidence, raw_output). Prose-only answers are rejected."
+            )
+        mentor = self._mentor_directives.get(task.tool_family or "")
+        if mentor:
+            directives.append(mentor)
+        return directives
+
+    def _maybe_reflect(self, task: SecurityTask, assistant_summary: str) -> bool:
+        """Reflector: re-dispatch a task that returned no structured runner output.
+
+        Bounded by ``max_reflect_attempts`` (default 3, aligned with pentagi's
+        Reflector). Returns True when a reflect retry was scheduled so the
+        caller must skip failing the task. Only triggers on the genuine
+        "no structured result" case, never on a task that already has runner
+        output (from-wide principle: do not misfire on slightly-off formats).
+        """
+        if self._max_reflect_attempts <= 0:
+            return False
+        if task.reflect_attempts >= self._max_reflect_attempts:
+            return False
+        task.reflect_attempts += 1
+        logger.info(
+            "Reflector re-dispatch: task=%s attempt=%d/%d (no structured runner output)",
+            task.task_id,
+            task.reflect_attempts,
+            self._max_reflect_attempts,
+        )
+        self._activities.append(
+            AgentActivityRecord(
+                activity_id=f"reflect_{task.task_id}_{task.reflect_attempts}",
+                agent_key=task.worker_agent_key or "",
+                agent_name="reflector",
+                task_id=task.task_id,
+                action="reflected",
+                summary=(assistant_summary or "")[:500],
+                started_at=task.started_at,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                execution_mode=task.worker_execution_mode or "subagent_session",
+            )
+        )
+        self._pool.reset_for_reflect(task.task_id)
+        return True
+
+    def _apply_mentor_feedback(self, settled_tasks: list[SecurityTask]) -> None:
+        """Mentor: after a batch settles, escalate repeatedly-failing families.
+
+        When a tool family's failure count reaches the execution monitor's
+        threshold, register an ``APPROACH CHANGE REQUIRED`` directive that is
+        injected into every subsequent (retried / reflected) task of that
+        family, instead of letting the campaign retry the same failing approach
+        indefinitely (QA-Agent rule: failure >= N must switch root approach).
+        """
+        if self._execution_monitor is None:
+            return
+        threshold = max(1, int(getattr(self._execution_monitor, "max_consecutive_runner_failures", 2)))
+        for task in settled_tasks:
+            if str(task.status or "") != TASK_FAILED:
+                continue
+            family = task.tool_family or ""
+            self._family_failure_counts[family] = self._family_failure_counts.get(family, 0) + 1
+            count = self._family_failure_counts[family]
+            if count >= threshold and family not in self._mentor_directives:
+                runner_key = self._runner_lookup(family) if (self._runner_lookup and family) else ""
+                directive = (
+                    f"APPROACH CHANGE REQUIRED: the {family or 'previous'} approach"
+                    + (f" (runner {runner_key})" if runner_key else "")
+                    + f" failed {count} time(s). Do not repeat the same failing profile/command. "
+                    "Try a materially different in-scope technique or return a clear limitation. "
+                    "Reference, not mandate: if this approach keeps failing in this environment, abandon it."
+                )
+                self._mentor_directives[family] = directive
+                logger.warning(
+                    "Mentor directive activated: family=%s failures=%d threshold=%d",
+                    family,
+                    count,
+                    threshold,
+                )
+                self._activities.append(
+                    AgentActivityRecord(
+                        activity_id=f"mentor_{family or 'unknown'}_{count}",
+                        agent_key="",
+                        agent_name="mentor",
+                        task_id=task.task_id,
+                        action="approach_change_required",
+                        summary=directive,
+                        completed_at=datetime.now(timezone.utc).isoformat(),
+                        execution_mode="scheduler",
+                    )
+                )
 
     async def _wait_for_sessions(
         self,
@@ -436,7 +611,11 @@ class SecuritySubagentCoordinator:
     def _apply_worker_output(self, task: SecurityTask, tool_output: dict[str, Any]) -> None:
         """Apply structured worker output to the task."""
         task.result_summary = str(tool_output.get("summary") or "")
-        task.raw_output = str(tool_output.get("raw_output") or "")[:10000]
+        # S4: preserve ports/CVE/URL/vuln signals instead of a blind head cut.
+        task.raw_output = compact_security_output(
+            str(tool_output.get("raw_output") or ""),
+            max_bytes=self._output_summary_threshold_bytes,
+        )
         task.parsed_result = tool_output.get("parsed_result") or {}
 
         # Check if worker reported success
