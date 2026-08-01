@@ -40,10 +40,10 @@ class SecurityRequestInterpreter:
             mode_request = {}
 
         user_message = str(getattr(context, "user_message", "") or "")
-        target = str(arguments.get("target") or mode_request.get("target") or "").strip()
-        target_url = str(arguments.get("target_url") or mode_request.get("target_url") or "").strip()
-        target_host = str(arguments.get("target_host") or mode_request.get("target_host") or "").strip()
-        target_network = str(arguments.get("target_network") or mode_request.get("target_network") or "").strip()
+        target = self._clean_target_value(arguments.get("target") or mode_request.get("target"))
+        target_url = self._clean_target_value(arguments.get("target_url") or mode_request.get("target_url"))
+        target_host = self._clean_target_value(arguments.get("target_host") or mode_request.get("target_host"))
+        target_network = self._clean_target_value(arguments.get("target_network") or mode_request.get("target_network"))
         if target and not any([target_url, target_host, target_network]):
             inferred = self.build_target(target)
             if inferred.target_type == "url":
@@ -99,7 +99,7 @@ class SecurityRequestInterpreter:
         return target
 
     def build_target(self, value: str) -> TargetCandidate:
-        value = value.strip()
+        value = self._clean_target_value(value)
         if re.match(r"^https?://", value, flags=re.IGNORECASE):
             parsed = urlparse(value)
             return TargetCandidate(
@@ -139,6 +139,9 @@ class SecurityRequestInterpreter:
             if match:
                 return match.group(0).rstrip(".,;)")
         return ""
+
+    def _clean_target_value(self, value: Any) -> str:
+        return str(value or "").strip().rstrip(".,;:!?，。；：！？)]}")
 
     def to_string_list(self, value: Any) -> list[str]:
         if isinstance(value, list):

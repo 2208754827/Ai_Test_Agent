@@ -100,6 +100,7 @@ class ToolRuntimeService:
         mcp_connection_manager: McpConnectionManager | None = None,
         compatibility_runner_service=None,
         session_resource_service: SessionResourceService | None = None,
+        runtime_control=None,
     ) -> None:
         self._request_timeout_seconds = request_timeout_seconds
         self._settings = settings
@@ -172,6 +173,7 @@ class ToolRuntimeService:
             report_template_service=self._report_template_service,
             runner_executor=self._execute_security_runner,
             report_delivery_executor=self._deliver_security_testing_report,
+            runtime_control=runtime_control,
         )
         self._performance_testing_mode_runtime = None
         if settings:
@@ -437,6 +439,8 @@ class ToolRuntimeService:
 
     def _resolve_result_status(self, result: dict[str, Any]) -> str:
         explicit_status = str(result.get("status") or "").strip().lower()
+        if explicit_status == "interrupted":
+            return "partial"
         if explicit_status in {"completed", "partial", "failed", "waiting_approval", "denied"}:
             return explicit_status
         if result.get("ok") is False:
@@ -2079,28 +2083,14 @@ class ToolRuntimeService:
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> dict[str, Any]:
-        return {
-            "status": "denied",
-            "ok": False,
-            "success": False,
-            "summary": "Traffic analysis runner is reserved for a later security testing phase.",
-            "runner_key": "traffic-analysis-runner",
-            "error": "runner_not_enabled",
-        }
+        return await self._execute_security_runner(arguments, context, "traffic-analysis-runner")
 
     async def _run_exploit_workbench_runner(
         self,
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> dict[str, Any]:
-        return {
-            "status": "denied",
-            "ok": False,
-            "success": False,
-            "summary": "Exploit workbench runner is reserved for approved Phase 3/4 workflows.",
-            "runner_key": "exploit-workbench-runner",
-            "error": "runner_not_enabled",
-        }
+        return await self._execute_security_runner(arguments, context, "exploit-workbench-runner")
 
     def _is_security_campaign_request(self, arguments: dict[str, Any]) -> bool:
         worker_action = str(arguments.get("worker_action") or "").strip().lower()
@@ -2195,13 +2185,7 @@ class ToolRuntimeService:
                 "error": "profile_blocked_in_environment",
             }
 
-        approval_granted = bool(
-            arguments.get("approved")
-            or arguments.get("approval_granted")
-            or arguments.get("authorization_confirmed")
-        )
-        if task is not None and not approval_granted:
-            approval_granted = bool(getattr(task, "approval_granted", False))
+        approval_granted = bool(arguments.get("_server_approval_granted"))
         if risk_policy.requires_approval(profile.profile_key) and not approval_granted:
             return {
                 "status": "waiting_approval",
@@ -2245,6 +2229,32 @@ class ToolRuntimeService:
                 "error": "missing_profile_arguments",
             }
 
+        if profile.profile_key == "free_command":
+            if not self._security_free_command_enabled():
+                return {
+                    "status": "denied",
+                    "ok": False,
+                    "success": False,
+                    "summary": "Controlled free commands are disabled by server configuration.",
+                    "runner_key": runner_key,
+                    "command_profile": profile.profile_key,
+                    "error": "free_command_disabled",
+                }
+            free_command_error = self._validate_free_security_command(
+                str(render_args.get("command") or ""),
+                str(render_args.get("target") or ""),
+            )
+            if free_command_error:
+                return {
+                    "status": "denied",
+                    "ok": False,
+                    "success": False,
+                    "summary": free_command_error,
+                    "runner_key": runner_key,
+                    "command_profile": profile.profile_key,
+                    "error": "free_command_rejected",
+                }
+
         preflight_error = self._security_profile_preflight(profile.profile_key, render_args)
         if preflight_error:
             return {
@@ -2272,6 +2282,13 @@ class ToolRuntimeService:
             }
 
         executable = command_args[0]
+        bootstrap_applied = False
+        if self._security_tool_bootstrap_enabled() and profile.profile_key != "free_command":
+            bootstrap = self._security_bootstrap_command(profile.tool_name, command, command_args)
+            if bootstrap:
+                command = bootstrap
+                command_args = ["sh", "-lc", bootstrap]
+                bootstrap_applied = True
         timeout_seconds = float(
             arguments.get("timeout_seconds")
             or (task.timeout_seconds if task is not None else 0)
@@ -2342,6 +2359,7 @@ class ToolRuntimeService:
             "duration_seconds": max(0.0, (execution_result.completed_at - execution_result.started_at).total_seconds()),
             "exit_code": exit_code,
             "timed_out": timed_out,
+            "bootstrap_applied": bootstrap_applied,
             "stdout": stdout_text[-20000:],
             "stderr": stderr_text[-12000:],
         }
@@ -2380,6 +2398,7 @@ class ToolRuntimeService:
                 "stdout_chars": len(stdout_text),
                 "stderr_chars": len(stderr_text),
                 "duration_seconds": transcript["duration_seconds"],
+                "bootstrap_applied": bootstrap_applied,
             },
             "error": None if success else ("timeout" if timed_out else stderr_text[-500:] or f"exit_code={exit_code}"),
         }
@@ -2435,6 +2454,10 @@ class ToolRuntimeService:
             return "sslscan_tls_audit"
         if runner_key == "credential-attack-runner":
             return "hydra_basic_login"
+        if runner_key == "traffic-analysis-runner":
+            return "tcpdump_timed_capture"
+        if runner_key == "exploit-workbench-runner":
+            return "searchsploit_exploit_lookup"
         target = str(arguments.get("target") or "").strip()
         return "httpx_probe" if target.startswith(("http://", "https://")) else "nmap_tcp_basic"
 
@@ -2469,6 +2492,10 @@ class ToolRuntimeService:
             "service",
             "userlist",
             "passlist",
+            "duration_seconds",
+            "packet_count",
+            "module_name",
+            "command",
         ):
             if arguments.get(key) not in (None, ""):
                 supplied[key] = arguments.get(key)
@@ -2476,7 +2503,7 @@ class ToolRuntimeService:
             supplied.setdefault("target", task.target)
             if task.target_port:
                 supplied.setdefault("ports", str(task.target_port))
-        if profile.profile_key == "searchsploit_lookup":
+        if profile.profile_key in {"searchsploit_lookup", "searchsploit_exploit_lookup"}:
             supplied.setdefault("query", supplied.get("target") or "")
         # Tools like sslscan only accept ``host[:port]`` targets, not full
         # URLs. Normalize before rendering so a target like
@@ -2496,6 +2523,8 @@ class ToolRuntimeService:
         supplied.setdefault("hydra_output", self._security_output_path(output_root, "hydra_result.txt"))
         supplied.setdefault("sqlmap_output_dir", self._security_output_path(output_root, "sqlmap_out"))
         supplied.setdefault("ports", "1-1000")
+        supplied.setdefault("duration_seconds", "30")
+        supplied.setdefault("packet_count", "100")
 
         render_args: dict[str, Any] = {}
         missing: list[str] = []
@@ -2504,8 +2533,73 @@ class ToolRuntimeService:
             if value in (None, ""):
                 missing.append(key)
                 continue
-            render_args[key] = self._sanitize_security_argument(str(value), allow_spaces=key == "query")
+            if profile.profile_key == "free_command" and key == "command":
+                render_args[key] = str(value).replace("\r", "").replace("\n", "").strip()
+            else:
+                render_args[key] = self._sanitize_security_argument(str(value), allow_spaces=key == "query")
         return render_args, missing
+
+    def _security_free_command_enabled(self) -> bool:
+        value = getattr(self._settings, "security_runner_allow_free_command", False) if self._settings else False
+        return bool(value)
+
+    def _security_tool_bootstrap_enabled(self) -> bool:
+        value = getattr(self._settings, "security_runner_tool_bootstrap", False) if self._settings else False
+        return bool(value) and self._security_runner_backend() in {"docker", "container"}
+
+    def _security_bootstrap_command(
+        self,
+        tool_name: str,
+        command: str,
+        command_args: list[str],
+    ) -> str:
+        package_by_tool = {
+            "tcpdump": "tcpdump",
+            "searchsploit": "exploitdb",
+            "msfconsole": "metasploit-framework",
+        }
+        package = package_by_tool.get(str(tool_name or "").strip())
+        if not package:
+            return ""
+        executable = shlex.quote(str(tool_name).strip())
+        package_name = shlex.quote(package)
+        rendered = command if command.strip() else shlex.join(command_args)
+        return (
+            f"if ! command -v {executable} >/dev/null 2>&1; then "
+            f"apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y {package_name}; "
+            f"fi; exec {rendered}"
+        )
+
+    def _validate_free_security_command(self, command: str, target: str) -> str:
+        normalized = str(command or "").strip()
+        explicit_target = str(target or "").strip().strip("'\"")
+        if not normalized or len(normalized) > 4096:
+            return "Controlled free command must contain between 1 and 4096 characters."
+        if not explicit_target:
+            return "Controlled free command requires an explicit target for allowlist enforcement."
+        try:
+            argv = self._split_security_command(normalized)
+        except ValueError:
+            return "Controlled free command could not be parsed safely."
+        allowed_executables = {
+            "nmap", "httpx", "whatweb", "nuclei", "sslscan", "searchsploit",
+            "tcpdump", "curl", "wget", "python3",
+        }
+        executable = Path(argv[0]).name.lower() if argv else ""
+        if executable not in allowed_executables:
+            return f"Executable '{executable or 'unknown'}' is not allowed for controlled free commands."
+        target_host = self._normalize_tls_target(explicit_target).split(":", 1)[0]
+        if explicit_target not in normalized and target_host not in normalized:
+            return "Controlled free command must reference its explicit authorized target."
+        denied_fragments = (
+            "rm -rf", "mkfs", "shutdown", "reboot", "poweroff", "dd if=",
+            ">/dev/", "docker.sock", "--privileged", "curl | sh", "wget | sh",
+        )
+        lowered = normalized.lower().replace(" ", "")
+        for fragment in denied_fragments:
+            if fragment.replace(" ", "") in lowered:
+                return f"Controlled free command contains denied destructive pattern '{fragment}'."
+        return ""
 
     @staticmethod
     def _normalize_tls_target(target: str) -> str:

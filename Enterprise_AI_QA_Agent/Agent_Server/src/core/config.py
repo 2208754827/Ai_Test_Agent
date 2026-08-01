@@ -90,10 +90,15 @@ class Settings(BaseSettings):
     security_runner_container_reuse: bool = False
     security_runner_docker_cleanup_after_run: bool | None = None
     security_runner_wrap_timeout: bool = True
+    security_runner_rewrite_localhost: bool = True
     # Security target allowlist hard gate (S6). Comma-separated hosts / IPs /
     # CIDR / *.suffix wildcards. Empty means "do not restrict" but every
     # execution against a public target is logged as a warning.
     security_target_allowlist: str = ""
+    # Polling cadence for detached security runner jobs (S1). Callers may use
+    # a faster interval for tests, but production orchestration should respect
+    # this default to avoid hammering the Docker daemon.
+    security_runner_detach_poll_interval_seconds: float = 3.0
     # Worker tool output above this byte threshold is compacted with a
     # structure-preserving summary instead of a blind head truncation (S4).
     security_runner_output_summary_threshold_bytes: int = 16384

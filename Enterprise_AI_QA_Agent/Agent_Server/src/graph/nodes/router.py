@@ -79,7 +79,12 @@ def build_router_node(
             capability for capability in allowed_capabilities if capability not in denied_capabilities
         ]
         restrict_tool_expansion = "do_not_expand_tool_access" in safety_assessment.get("restrictions", [])
-        initial_tool_keys = list(dict.fromkeys(["skill", *loaded_skill_tools]))
+        requested_tool_keys = [
+            str(item).strip()
+            for item in context_bundle.get("requested_tool_keys", [])
+            if str(item).strip()
+        ]
+        initial_tool_keys = list(dict.fromkeys(["skill", *loaded_skill_tools, *requested_tool_keys]))
         tools = capability_resolver.eligible_tools(
             tools=tool_registry.get_many(initial_tool_keys),
             active_mode_key=state["mode_key"],
@@ -152,6 +157,7 @@ def build_router_node(
         context_bundle["selected_agent_supported_skills"] = list(agent.supported_skills)
         context_bundle["selected_agent_supported_capabilities"] = list(agent.supported_capabilities)
         context_bundle["eligible_deferred_tool_count"] = len(state["deferred_tool_keys"])
+        context_bundle["requested_tool_keys"] = requested_tool_keys
         context_bundle["indirect_injection_signal_count"] = len(
             safety_assessment.get("indirect_injection_signals", [])
         )
@@ -172,6 +178,7 @@ def build_router_node(
             memory_hit_count=len(state["memory_hits"]),
             active_mcp_count=len(state["active_mcp_servers"]),
             available_tools=",".join(state["available_tool_keys"]) or "none",
+            requested_tools=",".join(requested_tool_keys) or "none",
             deferred_tool_count=len(state["deferred_tool_keys"]),
             indirect_injection_signal_count=context_bundle["indirect_injection_signal_count"],
         )

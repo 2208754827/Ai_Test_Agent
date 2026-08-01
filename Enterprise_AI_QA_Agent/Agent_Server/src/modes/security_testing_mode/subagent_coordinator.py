@@ -25,10 +25,12 @@ from src.modes.security_testing_mode.output_compaction import (
 )
 from src.modes.security_testing_mode.prompt_contract import build_security_worker_prompt
 from src.modes.security_testing_mode.task_pool import SecurityTaskPool
+from src.modes.security_testing_mode.subtask_refiner import SecuritySubtaskRefiner
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error.security_testing_mode.coordinator")
 
 CheckpointCallback = Callable[[str, SecurityTask, list[SecurityTask]], None]
+InterruptCheck = Callable[[], bool]
 
 
 # Phrases that indicate the target platform cannot be tested further without
@@ -83,6 +85,8 @@ class SecuritySubagentCoordinator:
         runner_lookup: Callable[[str], str] | None = None,
         max_reflect_attempts: int = 3,
         output_summary_threshold_bytes: int = DEFAULT_THRESHOLD_BYTES,
+        task_refiner: SecuritySubtaskRefiner | None = None,
+        interrupt_check: InterruptCheck | None = None,
     ) -> None:
         self._pool = pool
         self._coordinator_runtime_service = coordinator_runtime_service
@@ -97,6 +101,10 @@ class SecuritySubagentCoordinator:
         self._runner_lookup = runner_lookup
         self._max_reflect_attempts = max(0, max_reflect_attempts)
         self._output_summary_threshold_bytes = max(0, output_summary_threshold_bytes)
+        self._task_refiner = task_refiner or SecuritySubtaskRefiner()
+        self._refinement_pass = 0
+        self._interrupt_check = interrupt_check
+        self._interrupted = False
         self._activities: list[AgentActivityRecord] = []
         self._active_resource_locks: set[str] = set()
         # Mentor state: how many times each runner family has failed so far, and
@@ -110,7 +118,13 @@ class SecuritySubagentCoordinator:
 
     async def run_all(self) -> list[SecurityTask]:
         """Execute all tasks in the pool, respecting dependencies and concurrency."""
+        logger.info(
+            "security_coordinator_start %s",
+            self._log_payload(task_count=len(self._pool.all_tasks), max_workers=self._max_workers),
+        )
         while not self._pool.is_complete:
+            if await self._interrupt_if_requested():
+                break
             self._pool.resolve_blocked()
             batch = self._select_batch()
             if not batch:
@@ -118,11 +132,28 @@ class SecuritySubagentCoordinator:
                     await asyncio.sleep(self._poll_interval_seconds)
                     continue
                 break
+            logger.info(
+                "security_coordinator_batch_selected %s",
+                self._log_payload(task_ids=[task.task_id for task in batch]),
+            )
             await self._dispatch_batch(batch)
+            if self._interrupted:
+                break
+            self._refine_after_batch(batch)
             self._pool.resolve_blocked()
 
         # Retry failed tasks
         await self._retry_failed()
+
+        logger.info(
+            "security_coordinator_complete %s",
+            self._log_payload(
+                status_counts={
+                    status: sum(1 for task in self._pool.all_tasks if task.status == status)
+                    for status in sorted({task.status for task in self._pool.all_tasks})
+                }
+            ),
+        )
 
         return self._pool.all_tasks
 
@@ -137,6 +168,8 @@ class SecuritySubagentCoordinator:
 
         # Run another pass
         while not self._pool.is_complete:
+            if await self._interrupt_if_requested():
+                break
             self._pool.resolve_blocked()
             batch = self._select_batch()
             if not batch:
@@ -145,7 +178,34 @@ class SecuritySubagentCoordinator:
                     continue
                 break
             await self._dispatch_batch(batch)
+            if self._interrupted:
+                break
+            self._refine_after_batch(batch)
             self._pool.resolve_blocked()
+
+    def _refine_after_batch(self, settled_tasks: list[SecurityTask]) -> None:
+        self._refinement_pass += 1
+        refinement_id = f"batch_{self._refinement_pass}"
+        result = self._task_refiner.refine_task_pool(
+            pool=self._pool,
+            settled_tasks=settled_tasks,
+            refinement_id=refinement_id,
+        )
+        added = list(result.get("added_tasks") or [])
+        removed = list(result.get("removed_tasks") or [])
+        if not added and not removed:
+            return
+        logger.info(
+            "security_refiner_applied %s",
+            self._log_payload(
+                refinement_id=refinement_id,
+                added_task_ids=[task.task_id for task in added],
+                removed_task_ids=[task.task_id for task in removed],
+                task_count=self._pool.task_count,
+            ),
+        )
+        for task in added:
+            self._emit_checkpoint("task_refined", task)
 
     def _select_batch(self) -> list[SecurityTask]:
         """Select the next batch of tasks to dispatch."""
@@ -173,6 +233,36 @@ class SecuritySubagentCoordinator:
             batch.append(task)
 
         return batch
+
+    async def _interrupt_if_requested(
+        self,
+        *,
+        task_ids: list[str] | None = None,
+        child_session_ids: list[str] | None = None,
+    ) -> bool:
+        if self._interrupted:
+            return True
+        if self._interrupt_check is None or not self._interrupt_check():
+            return False
+        self._interrupted = True
+        reason = "Parent security campaign interrupt requested."
+        if self._coordinator_runtime_service is not None:
+            await self._coordinator_runtime_service.cancel_workers(
+                task_ids=list(task_ids or []),
+                child_session_ids=list(child_session_ids or []),
+                reason=reason,
+            )
+        interrupted_tasks = self._pool.interrupt_unsettled(reason)
+        for task in interrupted_tasks:
+            self._emit_checkpoint("task_interrupted", task)
+        logger.info(
+            "security_coordinator_interrupted %s",
+            self._log_payload(
+                task_ids=[task.task_id for task in interrupted_tasks],
+                child_session_ids=list(child_session_ids or []),
+            ),
+        )
+        return True
 
     def _has_resource_conflict(self, task: SecurityTask, batch: list[SecurityTask]) -> bool:
         """Check if a task conflicts with active or batched resource locks."""
@@ -248,6 +338,21 @@ class SecuritySubagentCoordinator:
 
             # Build worker specs
             workers = [self._build_worker_spec(task) for task in launched_tasks]
+            logger.info(
+                "security_workers_dispatching %s",
+                self._log_payload(
+                    workers=[
+                        {
+                            "task_id": task.task_id,
+                            "agent_key": task.worker_agent_key,
+                            "profile": task.command_profile,
+                            "family": task.tool_family,
+                            "target": task.target,
+                        }
+                        for task in launched_tasks
+                    ]
+                ),
+            )
 
             # Dispatch via coordinator runtime service
             dispatch_result = await self._coordinator_runtime_service.dispatch(
@@ -270,7 +375,19 @@ class SecuritySubagentCoordinator:
             ]
 
             # Wait for all sessions to complete
-            settled_sessions = await self._wait_for_sessions(child_session_ids)
+            settled_sessions = await self._wait_for_sessions(
+                child_session_ids,
+                task_ids=[task.task_id for task in launched_tasks],
+            )
+            if self._interrupted:
+                return
+            logger.info(
+                "security_workers_settled %s",
+                self._log_payload(
+                    child_session_ids=child_session_ids,
+                    settled_count=len(settled_sessions),
+                ),
+            )
             settled_map = {session.id: session for session in settled_sessions}
 
             # Process results
@@ -376,7 +493,7 @@ class SecuritySubagentCoordinator:
             self._apply_mentor_feedback(launched_tasks)
 
         except Exception as e:
-            logger.error(f"Batch dispatch failed: {e}")
+            logger.exception("security_batch_dispatch_failed %s", self._log_payload(error=str(e)))
             for task in launched_tasks:
                 if task.status == TASK_RUNNING:
                     self._fail_task(task, f"dispatch_error: {e}")
@@ -400,6 +517,7 @@ class SecuritySubagentCoordinator:
             "worker_action": "execute_security_task",
             "task": task.model_dump(mode="json"),
         }
+        runner_key = self._runner_lookup(task.tool_family) if self._runner_lookup else ""
 
         return {
             "task_id": task.task_id,
@@ -420,6 +538,10 @@ class SecuritySubagentCoordinator:
                 "surface_type": task.surface_type,
                 "tool_family": task.tool_family,
                 "command_profile": task.command_profile,
+                # Server-generated worker context asks the generic router to
+                # expose the one assigned runner immediately. Capability,
+                # agent support, safety and approval policies still apply.
+                "requested_tool_keys": [runner_key] if runner_key else [],
                 "target_fingerprint": str(parent_bundle.get("target_fingerprint") or ""),
                 "campaign_id": str(parent_bundle.get("campaign_id") or ""),
                 "platform_label": str(parent_bundle.get("platform_label") or ""),
@@ -532,6 +654,7 @@ class SecuritySubagentCoordinator:
         child_session_ids: list[str],
         *,
         overall_timeout_seconds: float | None = None,
+        task_ids: list[str] | None = None,
     ) -> list[Any]:
         """Wait for child sessions to reach a terminal state with a hard deadline.
 
@@ -566,6 +689,11 @@ class SecuritySubagentCoordinator:
             deadline = loop.time() + overall_timeout_seconds
 
         while pending:
+            if await self._interrupt_if_requested(
+                task_ids=task_ids,
+                child_session_ids=list(pending),
+            ):
+                break
             completed_ids: list[str] = []
             for session_id in list(pending):
                 session = await self._session_store.get_session(session_id)
@@ -716,6 +844,15 @@ class SecuritySubagentCoordinator:
             duration_seconds=duration,
             execution_mode=task.worker_execution_mode or "subagent_session",
         ))
+
+    def _log_payload(self, **values: Any) -> str:
+        payload = {
+            "session_id": str(self._parent_context.get("session_id") or ""),
+            "turn_id": str(self._parent_context.get("turn_id") or ""),
+            "trace_id": str(self._parent_context.get("trace_id") or ""),
+            **values,
+        }
+        return json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":"))
 
     def _extract_runner_output(self, messages: list[Any]) -> dict[str, Any] | None:
         """Extract the security runner tool output from session messages."""

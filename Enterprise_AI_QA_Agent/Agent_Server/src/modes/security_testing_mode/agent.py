@@ -32,9 +32,13 @@ PROFILE_WORKER_MAP: dict[str, str] = {
     "nmap_service_detect": SECURITY_RECON_WORKER_KEY,
     "nmap_full_scan": SECURITY_RECON_WORKER_KEY,
     "nmap_os_detect": SECURITY_RECON_WORKER_KEY,
-    "httpx_probe": SECURITY_RECON_WORKER_KEY,
-    "whatweb_fingerprint": SECURITY_RECON_WORKER_KEY,
-    "sslscan_tls_audit": SECURITY_RECON_WORKER_KEY,
+    # These profiles execute through web/service runner families. Route them
+    # to agents that explicitly support those runner tools; otherwise the
+    # generic tool exposure policy correctly hides the assigned runner and the
+    # worker can never satisfy its execution contract.
+    "httpx_probe": SECURITY_WEB_VERIFIER_KEY,
+    "whatweb_fingerprint": SECURITY_WEB_VERIFIER_KEY,
+    "sslscan_tls_audit": SECURITY_HOST_VERIFIER_KEY,
     "http_headers_probe": SECURITY_WEB_VERIFIER_KEY,
     "ffuf_common_dirs": SECURITY_WEB_VERIFIER_KEY,
     "gobuster_dirs": SECURITY_WEB_VERIFIER_KEY,

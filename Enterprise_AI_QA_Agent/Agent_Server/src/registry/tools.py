@@ -1279,7 +1279,7 @@ class ToolRegistry:
                         "支持 hydra_basic_login 等 profile。"
                     ),
                     category="execution",
-                    permission_level="restricted",
+                    permission_level="ask",
                     input_schema={
                         "type": "object",
                         "properties": {
@@ -1307,7 +1307,7 @@ class ToolRegistry:
                     name="Traffic Analysis Runner",
                     description="流量分析 runner，执行网络流量捕获和 TLS 分析（Phase 2）。",
                     category="execution",
-                    permission_level="restricted",
+                    permission_level="ask",
                     input_schema={
                         "type": "object",
                         "properties": {
@@ -1328,7 +1328,7 @@ class ToolRegistry:
                     name="Exploit Workbench Runner",
                     description="漏洞利用工作台 runner，执行 PoC 验证和漏洞利用（高风险，Phase 3/4）。",
                     category="execution",
-                    permission_level="restricted",
+                    permission_level="ask",
                     input_schema={
                         "type": "object",
                         "properties": {

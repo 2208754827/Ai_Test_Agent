@@ -5,10 +5,15 @@ All state is Pydantic-serializable so it can be persisted in
 """
 from __future__ import annotations
 
+import json
+import logging
 from datetime import datetime, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
+
+
+logger = logging.getLogger("uvicorn.error.security_testing_mode.campaign_state")
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +412,7 @@ class SecurityTestingState(BaseModel):
     selected_agent: str = ""
     selected_tools: list[str] = Field(default_factory=list)
     context_refs: list[dict[str, Any]] = Field(default_factory=list)
+    recalled_patterns: list[dict[str, Any]] = Field(default_factory=list)
     request: SecurityTestingRequestState = Field(default_factory=SecurityTestingRequestState)
     targets: list[TargetCandidate] = Field(default_factory=list)
     campaign: SecurityCampaign | None = None
@@ -428,6 +434,7 @@ class SecurityTestingState(BaseModel):
 
     def record_phase_transition(self, new_phase: str, reason: str = "") -> None:
         """Record a phase change and keep track of the previous one."""
+        old_phase = self.phase
         if self.phase != new_phase:
             self.previous_phase = self.phase
         self.phase = new_phase
@@ -440,6 +447,21 @@ class SecurityTestingState(BaseModel):
                     "at": self.last_updated_at,
                 }
             )
+        logger.info(
+            "security_phase_transition %s",
+            json.dumps(
+                {
+                    "session_id": self.session_id,
+                    "trace_id": self.trace_id,
+                    "campaign_id": self.campaign.campaign_id if self.campaign else "",
+                    "from_phase": old_phase,
+                    "to_phase": new_phase,
+                    "reason": reason,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+        )
 
 
 __all__ = [

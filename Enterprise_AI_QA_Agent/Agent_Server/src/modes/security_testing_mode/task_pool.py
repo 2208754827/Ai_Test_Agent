@@ -97,6 +97,58 @@ class SecurityTaskPool:
     def get(self, task_id: str) -> SecurityTask | None:
         return self._tasks.get(task_id)
 
+    def add_task(self, task: SecurityTask) -> bool:
+        """Add a refined task and derive its initial state from dependencies."""
+        if task.task_id in self._tasks:
+            return False
+        dependencies = [self._tasks[item] for item in task.depends_on if item in self._tasks]
+        if any(item.status in {TASK_FAILED, TASK_SKIPPED} for item in dependencies):
+            task.status = TASK_SKIPPED
+            task.last_error = "Skipped: a refinement dependency already failed."
+        elif dependencies and not all(item.status == TASK_COMPLETED for item in dependencies):
+            task.status = TASK_BLOCKED
+        else:
+            task.status = TASK_READY
+        self._tasks[task.task_id] = task
+        return True
+
+    def remove_task(self, task_id: str, reason: str = "") -> SecurityTask | None:
+        """Remove only a future task; running or settled evidence is immutable."""
+        task = self._tasks.get(task_id)
+        if task is None or task.status not in {TASK_PENDING, TASK_READY, TASK_BLOCKED}:
+            return None
+        removed = self._tasks.pop(task_id)
+        for dependent in self._tasks.values():
+            if task_id not in dependent.depends_on:
+                continue
+            dependent.depends_on = [item for item in dependent.depends_on if item != task_id]
+            if reason:
+                dependent.observations.append(reason)
+        self.resolve_blocked()
+        return removed
+
+    def downgrade_task(
+        self,
+        task_id: str,
+        *,
+        command_profile: str,
+        tool_family: str,
+        risk_level: str,
+        requires_approval: bool,
+        reason: str,
+    ) -> bool:
+        """Replace the execution strategy of a future task without changing identity."""
+        task = self._tasks.get(task_id)
+        if task is None or task.status not in {TASK_PENDING, TASK_READY, TASK_BLOCKED}:
+            return False
+        task.command_profile = command_profile
+        task.tool_family = tool_family
+        task.risk_level = risk_level
+        task.requires_approval = requires_approval
+        if reason:
+            task.observations.append(reason)
+        return True
+
     # ------------------------------------------------------------------
     # State transitions
     # ------------------------------------------------------------------
@@ -166,6 +218,18 @@ class SecurityTaskPool:
             task for task in self._tasks.values()
             if task.status == TASK_FAILED and task.attempts <= task.max_retries
         ]
+
+    def interrupt_unsettled(self, reason: str) -> list[SecurityTask]:
+        """Settle every non-terminal task without discarding completed evidence."""
+        interrupted: list[SecurityTask] = []
+        for task in self._tasks.values():
+            if task.status in {TASK_COMPLETED, TASK_FAILED, TASK_SKIPPED}:
+                continue
+            task.status = TASK_SKIPPED
+            task.last_error = str(reason or "Security campaign interrupted.")
+            task.completed_at = datetime.now(timezone.utc).isoformat()
+            interrupted.append(task)
+        return interrupted
 
     def reset_for_reflect(self, task_id: str) -> bool:
         """Return a running task to READY so the Reflector can re-dispatch it (S2).

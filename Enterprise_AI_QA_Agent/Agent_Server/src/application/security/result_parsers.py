@@ -494,6 +494,26 @@ class SearchsploitParser(BaseSecurityParser):
             }
 
 
+class TcpdumpParser(BaseSecurityParser):
+    """Parse bounded textual tcpdump output without retaining packet payloads."""
+
+    def parse(self, raw_output: str) -> dict[str, Any]:
+        packet_lines = [
+            line.strip()
+            for line in raw_output.splitlines()
+            if line.strip() and not line.lower().startswith("tcpdump:")
+        ]
+        endpoints: set[str] = set()
+        for line in packet_lines:
+            endpoints.update(re.findall(r"\b(?:\d{1,3}\.){3}\d{1,3}(?:\.\d+)?\b", line))
+        return {
+            "tool": "tcpdump",
+            "packet_count": len(packet_lines),
+            "endpoints": sorted(endpoints)[:50],
+            "sample": packet_lines[:20],
+        }
+
+
 # ---------------------------------------------------------------------------
 # Registry
 # ---------------------------------------------------------------------------
@@ -515,6 +535,7 @@ class SecurityResultParserRegistry:
             "hydra": HydraParser(),
             "sslscan": SslscanParser(),
             "searchsploit": SearchsploitParser(),
+            "tcpdump": TcpdumpParser(),
         }
 
     def parse(self, parser_key: str, raw_output: str) -> dict[str, Any]:

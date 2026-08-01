@@ -26,6 +26,7 @@ PHASE_RESULT_COLLECTION = "result_collection"
 PHASE_FAILURE_ANALYSIS = "failure_analysis"
 PHASE_REPORT_READY = "report_ready"
 PHASE_EMAIL_DELIVERED = "email_delivered"
+PHASE_INTERRUPTED = "interrupted"
 PHASE_FAILED = "failed"
 
 SecurityTestingPhase = Literal[
@@ -43,10 +44,11 @@ SecurityTestingPhase = Literal[
     "failure_analysis",
     "report_ready",
     "email_delivered",
+    "interrupted",
     "failed",
 ]
 
-TERMINAL_PHASES = frozenset({PHASE_REPORT_READY, PHASE_EMAIL_DELIVERED, PHASE_FAILED})
+TERMINAL_PHASES = frozenset({PHASE_REPORT_READY, PHASE_EMAIL_DELIVERED, PHASE_INTERRUPTED, PHASE_FAILED})
 
 AWAITING_PHASES = frozenset({PHASE_SCOPE_CONFIRMED})
 
@@ -202,6 +204,7 @@ __all__ = [
     "PHASE_FAILURE_ANALYSIS",
     "PHASE_REPORT_READY",
     "PHASE_EMAIL_DELIVERED",
+    "PHASE_INTERRUPTED",
     "PHASE_FAILED",
     "TERMINAL_PHASES",
     "AWAITING_PHASES",

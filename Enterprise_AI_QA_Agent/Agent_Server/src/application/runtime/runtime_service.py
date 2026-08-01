@@ -161,6 +161,10 @@ class RuntimeService:
         )
 
         if approval["status"] == "approved" and scope_matches and execution_safety.behavior != "deny":
+            tool_call.arguments = {
+                **tool_call.arguments,
+                "_server_approval_granted": True,
+            }
             append_graph_event(
                 state,
                 "tool.execution_started",
@@ -221,9 +225,14 @@ class RuntimeService:
         tool_messages.append(approved_tool_message)
         pending_ids = [item for item in pending_ids if item != approval["id"]]
 
+        remaining_approvals = [
+            item
+            for item in state["pending_approvals"]
+            if str(item.get("id") or "") in pending_ids
+        ]
         state["tool_results"] = tool_results
         state["tool_messages"] = tool_messages
-        state["pending_approvals"] = []
+        state["pending_approvals"] = remaining_approvals
         state["pending_turn"] = {}
         state["control_state"] = "resuming"
 
@@ -231,6 +240,7 @@ class RuntimeService:
             pending_turn["tool_results"] = tool_results
             pending_turn["tool_messages"] = tool_messages
             pending_turn["pending_approval_ids"] = pending_ids
+            pending_turn["pending_approvals"] = remaining_approvals
             state["pending_turn"] = pending_turn
             state["termination_reason"] = "waiting_approval"
             snapshot = self._build_snapshot(session, state, session.snapshot_count + 1)
@@ -363,7 +373,8 @@ class RuntimeService:
         state["context_bundle"] = context_bundle
 
     def _build_initial_state(self, session: SessionRecord, request: ExecutionRequest) -> dict[str, Any]:
-        model_config = self._effective_model_config()
+        requested_model_key = request.model_key or session.preferred_model or ""
+        model_config = self._effective_model_config(requested_model_key)
         selected_model_key = model_config.key if model_config is not None else (request.model_key or session.preferred_model or "")
         selected_model_name = model_config.name if model_config is not None else ""
         selected_model_provider = model_config.provider if model_config is not None else ""
@@ -478,18 +489,29 @@ class RuntimeService:
         state["tool_messages"] = [self._build_tool_message(execution_record)]
         state["selected_agent_name"] = str(state["selected_agent_key"] or "")
         output_payload = execution_record.output if isinstance(execution_record.output, dict) else {}
+        security_status = str(output_payload.get("status") or "").strip().lower()
         final_response = str(
             output_payload.get("report_markdown")
             or output_payload.get("summary")
             or execution_record.summary
         ).strip()
         state["final_response"] = final_response
-        state["control_state"] = "completed"
+        state["control_state"] = "interrupted" if security_status == "interrupted" else "completed"
         state["continue_loop"] = False
-        state["termination_reason"] = "failed" if execution_record.status == "failed" else ""
+        state["termination_reason"] = (
+            "interrupted"
+            if security_status == "interrupted"
+            else "failed"
+            if execution_record.status == "failed"
+            else ""
+        )
         append_graph_event(
             state,
-            "runtime.turn_completed" if execution_record.status != "failed" else "runtime.turn_failed",
+            "runtime.turn_interrupted"
+            if security_status == "interrupted"
+            else "runtime.turn_completed"
+            if execution_record.status != "failed"
+            else "runtime.turn_failed",
             "runtime",
             execution_record.summary,
             tool_key=execution_record.tool_key,
@@ -534,7 +556,11 @@ class RuntimeService:
                 arguments[key] = value
         return arguments
 
-    def _effective_model_config(self) -> ModelConfigRecord | None:
+    def _effective_model_config(self, requested_model_key: str = "") -> ModelConfigRecord | None:
+        if requested_model_key:
+            requested = self._model_runtime_service.get_model_config(requested_model_key)
+            if requested is not None:
+                return requested
         return self._model_runtime_service.get_default_model_config()
 
     def _build_conversation_messages(self, session: SessionRecord) -> list[dict[str, Any]]:

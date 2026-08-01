@@ -521,7 +521,7 @@ class TestModeIntentService:
 
     def _extract_url(self, value: str) -> str:
         match = self.URL_PATTERN.search(value or "")
-        return match.group(0).strip() if match else ""
+        return match.group(0).strip().rstrip(".,;:!?，。；：！？)]}") if match else ""
 
     def _first_match(self, text: str, mapping: dict[str, str], *, default: str) -> str:
         for token, resolved in mapping.items():

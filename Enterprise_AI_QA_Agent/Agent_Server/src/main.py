@@ -212,6 +212,7 @@ async def lifespan(app: FastAPI):
         mcp_connection_manager=mcp_connection_manager,
         compatibility_runner_service=compatibility_runner_service,
         session_resource_service=session_resource_service,
+        runtime_control=runtime_control,
     )
     graph = build_agent_graph(
         agent_registry=agent_registry,

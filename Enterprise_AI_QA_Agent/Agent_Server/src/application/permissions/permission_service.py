@@ -204,6 +204,25 @@ class PermissionService:
             )
 
         if (
+            policy_context.active_mode_key == "security_testing"
+            and tool.owner_mode_key == "security_testing"
+            and policy_context.authorization_status == "verified"
+            and policy_context.safety_decision in {"allow", "allow_with_limits", "require_confirmation"}
+            and tool.permission_level == "ask"
+        ):
+            return self._decision(
+                tool=tool,
+                behavior="allow",
+                visibility="visible",
+                reason=(
+                    "Verified security-mode runner is visible; concrete task risk "
+                    "is re-evaluated immediately before execution."
+                ),
+                reason_code="verified_security_runner_deferred_risk_gate",
+                policy_key="security_testing.verified_runner",
+            )
+
+        if (
             policy_context.safety_decision == "require_confirmation"
             and tool.category in self.SIDE_EFFECT_CATEGORIES
         ):

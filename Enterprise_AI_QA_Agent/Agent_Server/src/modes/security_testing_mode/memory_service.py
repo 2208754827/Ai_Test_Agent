@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 from uuid import uuid4
 
@@ -13,6 +14,9 @@ from src.modes.security_testing_mode.campaign_state import (
 from src.modes.security_testing_mode.contracts import TASK_FAILED
 from src.runtime.execution_logging import truncate_text
 from src.schemas.observation import ObservationRecord
+
+
+logger = logging.getLogger("uvicorn.error.security_testing_mode.memory")
 
 
 class SecurityMemoryService:
@@ -31,6 +35,79 @@ class SecurityMemoryService:
         if not observations:
             return []
         return await memory_runtime_service.write_observations(observations)
+
+    async def recall_successful_patterns(
+        self,
+        *,
+        target_fingerprint: str,
+        surface_types: list[str],
+        context: Any,
+        memory_runtime_service: Any,
+        top_k: int = 8,
+    ) -> list[dict[str, Any]]:
+        """Recall successful profiles for the exact server-derived target fingerprint."""
+        fingerprint = str(target_fingerprint or "").strip()
+        if memory_runtime_service is None or not fingerprint:
+            return []
+        session_id = str(getattr(context, "session_id", "") or "") or None
+        trace_id = str(getattr(context, "trace_id", "") or "")
+        allowed_surfaces = {str(item).strip() for item in surface_types if str(item).strip()}
+        try:
+            result = await memory_runtime_service.retrieve_observation_context(
+                session_id=session_id,
+                trace_id=trace_id,
+                query=(
+                    "successful security tool execution profile for target fingerprint "
+                    f"{fingerprint}"
+                ),
+                context={
+                    "mode_key": "security_testing",
+                    "security_memory_scope": "shared",
+                    "allow_cross_session_memory": True,
+                    "target_fingerprint": fingerprint,
+                },
+                top_k=max(1, min(int(top_k), 20)),
+            )
+        except Exception as exc:
+            logger.warning(
+                "security_memory_recall_failed target_fingerprint=%s error=%s",
+                fingerprint,
+                exc,
+            )
+            return []
+
+        patterns: list[dict[str, Any]] = []
+        seen_profiles: set[str] = set()
+        for hit in getattr(result, "hits", []) or []:
+            metadata = dict(getattr(hit, "metadata", {}) or {})
+            tags = {str(item) for item in (getattr(hit, "tags", []) or [])}
+            profile_key = str(metadata.get("profile_key") or "").strip()
+            surface_type = str(metadata.get("surface_type") or "").strip()
+            if not profile_key or profile_key in seen_profiles or "success" not in tags:
+                continue
+            if allowed_surfaces and surface_type and surface_type not in allowed_surfaces:
+                continue
+            seen_profiles.add(profile_key)
+            patterns.append(
+                {
+                    "profile_key": profile_key,
+                    "surface_type": surface_type,
+                    "produced_finding": bool(metadata.get("produced_finding")),
+                    "summary": str(getattr(hit, "summary", "") or ""),
+                    "score": float(getattr(hit, "score", 0.0) or 0.0),
+                    "source_session_id": str(getattr(hit, "session_id", "") or ""),
+                }
+            )
+        patterns.sort(
+            key=lambda item: (bool(item["produced_finding"]), float(item["score"])),
+            reverse=True,
+        )
+        logger.info(
+            "security_memory_recall_completed target_fingerprint=%s recalled_profiles=%s",
+            fingerprint,
+            [item["profile_key"] for item in patterns],
+        )
+        return patterns
 
     def build_campaign_observations(
         self,
@@ -173,6 +250,10 @@ class SecurityMemoryService:
         turn_id: str,
         trace_id: str,
     ) -> ObservationRecord:
+        task = next((item for item in campaign.tasks if item.task_id == record.task_id), None)
+        profile_key = str(task.command_profile if task is not None else record.tool_name or "")
+        surface_type = str(task.surface_type if task is not None else "")
+        produced_finding = any(record.task_id in finding.source_task_ids for finding in campaign.findings)
         content = {
             "campaign_id": campaign.campaign_id,
             "target_fingerprint": campaign.target_fingerprint,
@@ -186,6 +267,9 @@ class SecurityMemoryService:
             "artifact_count": len(record.artifacts),
             "stdout_summary": record.stdout_summary,
             "stderr_summary": record.stderr_summary,
+            "profile_key": profile_key,
+            "surface_type": surface_type,
+            "produced_finding": produced_finding,
         }
         status_tag = "success" if record.success else "failed"
         return self._observation(
@@ -197,6 +281,11 @@ class SecurityMemoryService:
             content=content,
             source=record.artifacts[0] if record.artifacts else campaign.campaign_id,
             tags=["security", "security_testing", "tool_execution", status_tag, record.tool_name or "unknown_tool"],
+            metadata={
+                "profile_key": profile_key,
+                "surface_type": surface_type,
+                "produced_finding": produced_finding,
+            },
         )
 
     def _observation(
@@ -210,6 +299,7 @@ class SecurityMemoryService:
         content: dict[str, Any],
         source: str,
         tags: list[str],
+        metadata: dict[str, Any] | None = None,
     ) -> ObservationRecord:
         return ObservationRecord(
             id=str(uuid4()),
@@ -227,9 +317,11 @@ class SecurityMemoryService:
             tags=list(dict.fromkeys([item for item in tags if item])),
             metadata={
                 "mode": "security_testing",
+                "mode_key": "security_testing",
                 "campaign_id": content.get("campaign_id"),
                 "target_fingerprint": content.get("target_fingerprint"),
                 "observation_kind": tags[2] if len(tags) > 2 else "security",
+                **dict(metadata or {}),
             },
         )
 

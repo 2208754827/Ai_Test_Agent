@@ -493,7 +493,7 @@ class AgentRegistry:
                         "report.generate",
                     ],
                     supported_skills=["vulnerability-analysis", "network-reconnaissance"],
-                    supported_models=["claude-sonnet-4", "gpt-5.4", "deepseek-reasoner"],
+                    supported_models=["qwen3.6-plus", "claude-sonnet-4", "gpt-5.4", "deepseek-reasoner"],
                     default_model="claude-sonnet-4",
                     tags=["testing", "security", "penetration", "orchestration"],
                 )
@@ -507,7 +507,7 @@ class AgentRegistry:
                     description="解析用户提供的安全测试文档、API 规范、架构图等，提取目标、端点、认证方式和测试范围。",
                     supported_tools=["knowledge-rag", "attachment-reader", "observation-search"],
                     supported_skills=["vulnerability-analysis"],
-                    supported_models=["claude-sonnet-4", "gpt-5.4"],
+                    supported_models=["qwen3.6-plus", "claude-sonnet-4", "gpt-5.4"],
                     default_model="claude-sonnet-4",
                     tags=["testing", "security", "analysis"],
                 )
@@ -521,7 +521,7 @@ class AgentRegistry:
                     description="分析已发现的资产、端口、服务和 Web 应用，生成结构化的安全测试任务树和依赖关系。",
                     supported_tools=["knowledge-rag", "observation-search", "session-history"],
                     supported_skills=["vulnerability-analysis", "network-reconnaissance"],
-                    supported_models=["claude-sonnet-4", "gpt-5.4"],
+                    supported_models=["qwen3.6-plus", "claude-sonnet-4", "gpt-5.4"],
                     default_model="claude-sonnet-4",
                     tags=["testing", "security", "planning"],
                 )
@@ -540,7 +540,7 @@ class AgentRegistry:
                         "observation-search",
                     ],
                     supported_skills=["network-reconnaissance"],
-                    supported_models=["claude-sonnet-4", "gpt-5.4"],
+                    supported_models=["qwen3.6-plus", "claude-sonnet-4", "gpt-5.4"],
                     default_model="claude-sonnet-4",
                     tags=["testing", "security", "recon", "worker"],
                 )
@@ -558,7 +558,7 @@ class AgentRegistry:
                         "knowledge-rag",
                     ],
                     supported_skills=["vulnerability-analysis"],
-                    supported_models=["claude-sonnet-4", "gpt-5.4"],
+                    supported_models=["qwen3.6-plus", "claude-sonnet-4", "gpt-5.4"],
                     default_model="claude-sonnet-4",
                     tags=["testing", "security", "auth", "worker"],
                 )
@@ -577,7 +577,7 @@ class AgentRegistry:
                         "observation-search",
                     ],
                     supported_skills=["vulnerability-analysis"],
-                    supported_models=["claude-sonnet-4", "gpt-5.4"],
+                    supported_models=["qwen3.6-plus", "claude-sonnet-4", "gpt-5.4"],
                     default_model="claude-sonnet-4",
                     tags=["testing", "security", "web", "worker"],
                 )
@@ -595,7 +595,7 @@ class AgentRegistry:
                         "knowledge-rag",
                     ],
                     supported_skills=["vulnerability-analysis"],
-                    supported_models=["claude-sonnet-4", "gpt-5.4"],
+                    supported_models=["qwen3.6-plus", "claude-sonnet-4", "gpt-5.4"],
                     default_model="claude-sonnet-4",
                     tags=["testing", "security", "api", "worker"],
                 )
@@ -610,10 +610,11 @@ class AgentRegistry:
                     supported_tools=[
                         "service-audit-runner",
                         "network-recon-runner",
+                        "traffic-analysis-runner",
                         "knowledge-rag",
                     ],
                     supported_skills=["vulnerability-analysis"],
-                    supported_models=["claude-sonnet-4", "gpt-5.4"],
+                    supported_models=["qwen3.6-plus", "claude-sonnet-4", "gpt-5.4"],
                     default_model="claude-sonnet-4",
                     tags=["testing", "security", "host", "worker"],
                 )
@@ -630,7 +631,7 @@ class AgentRegistry:
                         "knowledge-rag",
                     ],
                     supported_skills=["vulnerability-analysis"],
-                    supported_models=["claude-sonnet-4", "gpt-5.4"],
+                    supported_models=["qwen3.6-plus", "claude-sonnet-4", "gpt-5.4"],
                     default_model="claude-sonnet-4",
                     tags=["testing", "security", "exploit", "worker"],
                 )
@@ -644,7 +645,7 @@ class AgentRegistry:
                     description="当安全测试任务失败时，分析失败原因、判断是否可重试、建议替代工具或参数修复方案。",
                     supported_tools=["knowledge-rag", "observation-search", "session-history"],
                     supported_skills=["vulnerability-analysis"],
-                    supported_models=["claude-sonnet-4", "gpt-5.4"],
+                    supported_models=["qwen3.6-plus", "claude-sonnet-4", "gpt-5.4"],
                     default_model="claude-sonnet-4",
                     tags=["testing", "security", "failure-analysis"],
                 )

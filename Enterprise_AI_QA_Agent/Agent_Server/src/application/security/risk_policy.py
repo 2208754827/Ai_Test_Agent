@@ -11,6 +11,10 @@ ALWAYS_REQUIRE_APPROVAL: frozenset[str] = frozenset({
     "hydra_basic_login",
     "nmap_full_scan",
     "sqlmap_readonly_probe",
+    "tcpdump_timed_capture",
+    "searchsploit_exploit_lookup",
+    "msf_module_info",
+    "free_command",
 })
 
 # Max concurrent workers per profile risk level
@@ -28,6 +32,9 @@ BLOCKED_IN_PRODUCTION: frozenset[str] = frozenset({
     "nmap_full_scan",
     "sqlmap_readonly_probe",
     "nuclei_cve_scan",
+    "tcpdump_timed_capture",
+    "msf_module_info",
+    "free_command",
 })
 
 

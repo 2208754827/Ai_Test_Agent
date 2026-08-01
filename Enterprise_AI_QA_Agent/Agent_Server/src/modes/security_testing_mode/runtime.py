@@ -43,6 +43,7 @@ from src.modes.security_testing_mode.contracts import (
     PHASE_EMAIL_DELIVERED,
     PHASE_ATTACK_PLAN_READY,
     PHASE_FAILED,
+    PHASE_INTERRUPTED,
     PHASE_RECON_COMPLETE,
     PHASE_RECON_RUNNING,
     PHASE_REPORT_READY,
@@ -82,7 +83,7 @@ from src.modes.security_testing_mode.vulnerability_planner import SecurityVulner
 RunnerExecutor = Callable[[dict[str, Any], Any, str | None], Awaitable[dict[str, Any]]]
 ReportDeliveryExecutor = Callable[[dict[str, Any], Any], Awaitable[dict[str, Any]]]
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("uvicorn.error.security_testing_mode.runtime")
 
 
 class SecurityTestingModeRuntime:
@@ -98,6 +99,7 @@ class SecurityTestingModeRuntime:
         report_template_service: ReportTemplateService | None = None,
         runner_executor: RunnerExecutor | None = None,
         report_delivery_executor: ReportDeliveryExecutor | None = None,
+        runtime_control: Any = None,
     ) -> None:
         self._settings = settings
         self._coordinator_runtime_service = coordinator_runtime_service
@@ -105,6 +107,7 @@ class SecurityTestingModeRuntime:
         self._memory_runtime_service = memory_runtime_service
         self._runner_executor = runner_executor
         self._report_delivery_executor = report_delivery_executor
+        self._runtime_control = runtime_control
         self._tool_catalog = SecurityToolCatalog()
         self._risk_policy = SecurityRiskPolicy()
         self._execution_monitor = SecurityExecutionMonitor()
@@ -157,10 +160,28 @@ class SecurityTestingModeRuntime:
         """Restore state, advance the phase machine, persist, and return output."""
         worker_action = str(arguments.get("worker_action") or "").strip().lower()
         if worker_action == "execute_security_task" or isinstance(arguments.get("task"), dict):
+            logger.info(
+                "security_worker_entry %s",
+                self._log_payload(
+                    context=context,
+                    worker_action=worker_action or "execute_security_task",
+                    task_id=str((arguments.get("task") or {}).get("task_id") or ""),
+                ),
+            )
             return await self._execute_dispatched_task(arguments, context)
 
         state = self._restore_state(context)
         request = self._build_request(arguments, context)
+        logger.info(
+            "security_campaign_entry %s",
+            self._log_payload(
+                context=context,
+                phase=state.phase,
+                objective=request.objective[:200],
+                target=request.target_url or request.target_host,
+                risk_tolerance=request.risk_tolerance,
+            ),
+        )
 
         if state.phase in TERMINAL_PHASES and request.raw_message.strip():
             state = SecurityTestingState()
@@ -177,6 +198,10 @@ class SecurityTestingModeRuntime:
             if error_note not in state.notes:
                 state.notes.append(error_note)
             state.error = str(exc)
+            logger.exception(
+                "security_campaign_unhandled_error %s",
+                self._log_payload(context=context, phase=state.phase, error=str(exc)),
+            )
             state.record_phase_transition(PHASE_FAILED, "Unhandled execution error.")
         if state.phase == PHASE_FAILED:
             state = await self._finalize_failed_state(state, context)
@@ -186,6 +211,18 @@ class SecurityTestingModeRuntime:
         # skipped), reconcile delivery state once here.
         state = await self._ensure_terminal_delivery(state, context)
         self._persist_state(state, context)
+        logger.info(
+            "security_campaign_exit %s",
+            self._log_payload(
+                context=context,
+                phase=state.phase,
+                campaign_id=state.campaign.campaign_id if state.campaign else "",
+                execution_strategy=state.execution_strategy,
+                task_summary=self._task_status_summary(state.campaign.tasks if state.campaign else []),
+                finding_count=len(state.campaign.findings) if state.campaign else 0,
+                error=state.error,
+            ),
+        )
         return self._build_output(state)
 
     async def _advance(self, state: SecurityTestingState, context: Any) -> SecurityTestingState:
@@ -203,7 +240,7 @@ class SecurityTestingModeRuntime:
             state = self._discover_seed_assets(state)
 
         if state.phase == PHASE_ASSET_DISCOVERED:
-            state = self._build_campaign(state)
+            state = await self._build_campaign(state, context)
 
         if state.phase == PHASE_ATTACK_PLAN_READY:
             state = await self._execute_campaign(state, context)
@@ -269,12 +306,36 @@ class SecurityTestingModeRuntime:
         state.context_refs = self._build_context_refs(state)
         return state
 
-    def _build_campaign(self, state: SecurityTestingState) -> SecurityTestingState:
+    async def _build_campaign(self, state: SecurityTestingState, context: Any) -> SecurityTestingState:
         if state.campaign is None:
             state.record_phase_transition(PHASE_FAILED, "No campaign state available.")
             return state
 
-        tasks = self._recon_planner.build_campaign_tasks(state.targets, state.request)
+        state.recalled_patterns = await self._memory_service.recall_successful_patterns(
+            target_fingerprint=state.campaign.target_fingerprint or state.request.target_fingerprint,
+            surface_types=[self._recon_planner.surface_for_target(target) for target in state.targets],
+            context=context,
+            memory_runtime_service=self._memory_runtime_service,
+        )
+        recalled_profile_keys = [
+            str(item.get("profile_key") or "")
+            for item in state.recalled_patterns
+            if str(item.get("profile_key") or "")
+        ]
+        if recalled_profile_keys:
+            state.notes.append(
+                "Memory-first planning recalled successful profile(s): "
+                + ", ".join(recalled_profile_keys)
+                + ". Historical success is advisory; runtime failures still trigger route changes."
+            )
+            bundle = getattr(context, "context_bundle", None)
+            if isinstance(bundle, dict):
+                bundle["security_recalled_patterns"] = list(state.recalled_patterns)
+        tasks = self._recon_planner.build_campaign_tasks(
+            state.targets,
+            state.request,
+            preferred_profile_keys=recalled_profile_keys,
+        )
         tasks = self._vulnerability_planner.refine_tasks(tasks, state.request)
         tasks, monitor_notes = self._execution_monitor.filter_planned_tasks(
             tasks,
@@ -328,6 +389,16 @@ class SecurityTestingModeRuntime:
 
         if self._can_use_subagent_execution(context):
             state.execution_strategy = "subagent_session"
+            logger.info(
+                "security_execution_strategy %s",
+                self._log_payload(
+                    context=context,
+                    campaign_id=state.campaign.campaign_id,
+                    strategy=state.execution_strategy,
+                    task_count=len(state.campaign.tasks),
+                    max_workers=state.campaign.max_workers,
+                ),
+            )
             coordinator = SecuritySubagentCoordinator(
                 pool=pool,
                 coordinator_runtime_service=self._coordinator_runtime_service,
@@ -340,11 +411,22 @@ class SecurityTestingModeRuntime:
                 execution_monitor=self._execution_monitor,
                 runner_lookup=self._tool_catalog.resolve_runner_for_family,
                 output_summary_threshold_bytes=self._output_summary_threshold_bytes,
+                task_refiner=self._subtask_refiner,
+                interrupt_check=lambda: self._is_interrupt_requested(context),
             )
             completed_tasks = await coordinator.run_all()
             state.campaign.activities.extend(coordinator.activities)
         else:
             state.execution_strategy = "local_worker_fallback"
+            logger.info(
+                "security_execution_strategy %s",
+                self._log_payload(
+                    context=context,
+                    campaign_id=state.campaign.campaign_id,
+                    strategy=state.execution_strategy,
+                    task_count=len(state.campaign.tasks),
+                ),
+            )
             note = (
                 "Subagent execution unavailable; using local worker fallback while preserving "
                 "specialist worker routing."
@@ -359,6 +441,15 @@ class SecurityTestingModeRuntime:
             )
 
         state.campaign.tasks = completed_tasks
+        if self._is_interrupt_requested(context):
+            state.error = "Security campaign interrupted by user request."
+            if state.error not in state.notes:
+                state.notes.append(state.error)
+            state.record_phase_transition(
+                PHASE_INTERRUPTED,
+                "Parent session interrupt propagated to security workers.",
+            )
+            return state
         state.campaign.subtasks, refinement_notes = self._subtask_refiner.refine_after_execution(state.campaign)
         monitor_notes = self._execution_monitor.analyze_settled_tasks(
             completed_tasks,
@@ -734,11 +825,17 @@ class SecurityTestingModeRuntime:
         checkpoint_callback: Callable[[str, SecurityTask, list[SecurityTask]], None] | None = None,
     ) -> list[SecurityTask]:
         while not pool.is_complete:
+            if self._is_interrupt_requested(context):
+                pool.interrupt_unsettled("Parent security campaign interrupt requested.")
+                break
             pool.resolve_blocked()
             ready = pool.ready_tasks()
             if not ready:
                 break
             for task in ready:
+                if self._is_interrupt_requested(context):
+                    pool.interrupt_unsettled("Parent security campaign interrupt requested.")
+                    break
                 if self._reject_local_task_out_of_scope(task, pool, campaign, checkpoint_callback):
                     continue
                 task.worker_agent_key = task.worker_agent_key or resolve_security_worker_agent(
@@ -1544,7 +1641,32 @@ class SecurityTestingModeRuntime:
             "updated_at": now,
             "trace_id": state.trace_id,
         }
+        logger.info(
+            "security_execution_checkpoint %s",
+            self._log_payload(
+                context=context,
+                campaign_id=state.execution_checkpoint["campaign_id"],
+                phase=state.phase,
+                event_type=event_type,
+                task_id=task.task_id if task else "",
+                task_status=task.status if task else "",
+                command_profile=task.command_profile if task else "",
+                worker_session_id=task.worker_session_id if task else "",
+                task_summary=state.execution_checkpoint["task_summary"],
+                error=task.last_error if task else "",
+            ),
+        )
         self._persist_state(state, context)
+
+    def _log_payload(self, *, context: Any, **values: Any) -> str:
+        """Render stable JSON log context without credentials or raw payloads."""
+        payload = {
+            "session_id": str(getattr(context, "session_id", "") or ""),
+            "turn_id": str(getattr(context, "turn_id", "") or ""),
+            "trace_id": str(getattr(context, "trace_id", "") or ""),
+            **values,
+        }
+        return json.dumps(payload, ensure_ascii=False, default=str, separators=(",", ":"))
 
     def _restore_state(self, context: Any) -> SecurityTestingState:
         bundle = getattr(context, "context_bundle", None) or {}
@@ -1568,7 +1690,9 @@ class SecurityTestingModeRuntime:
         report_has_failures = bool(state.report and state.report.failed_tasks)
         output: dict[str, Any] = {
             "status": (
-                "partial"
+                "interrupted"
+                if state.phase == PHASE_INTERRUPTED
+                else "partial"
                 if delivery_failed or (completed and report_has_failures)
                 else "completed"
                 if completed
@@ -1623,6 +1747,11 @@ class SecurityTestingModeRuntime:
         return output
 
     def _build_summary(self, state: SecurityTestingState) -> str:
+        if state.phase == PHASE_INTERRUPTED:
+            return (
+                "Security testing was interrupted; completed evidence was preserved "
+                "and no new workers will be dispatched."
+            )
         if state.phase == PHASE_FAILED:
             return state.notes[-1] if state.notes else "Security testing mode encountered an error."
         if state.phase == PHASE_EMAIL_DELIVERED and state.report:
@@ -1652,6 +1781,12 @@ class SecurityTestingModeRuntime:
         if state.phase == PHASE_ATTACK_PLAN_READY and state.campaign:
             return f"Security campaign is ready with {len(state.campaign.tasks)} task(s)."
         return f"Security testing mode is in phase: {state.phase}."
+
+    def _is_interrupt_requested(self, context: Any) -> bool:
+        if self._runtime_control is None:
+            return False
+        session_id = str(getattr(context, "session_id", "") or "")
+        return bool(session_id and self._runtime_control.is_interrupt_requested(session_id))
 
     def _can_use_subagent_execution(self, context: Any) -> bool:
         if self._coordinator_runtime_service is None or self._session_store is None:

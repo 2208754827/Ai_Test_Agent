@@ -28,10 +28,18 @@ class SecurityReconPlanner:
         self,
         targets: list[TargetCandidate],
         request: SecurityTestingRequestState,
+        preferred_profile_keys: list[str] | None = None,
     ) -> list[SecurityTask]:
         tasks: list[SecurityTask] = []
         for target in targets:
-            tasks.extend(self.build_tasks_for_target(target, request, start_index=len(tasks) + 1))
+            tasks.extend(
+                self.build_tasks_for_target(
+                    target,
+                    request,
+                    start_index=len(tasks) + 1,
+                    preferred_profile_keys=preferred_profile_keys,
+                )
+            )
         return tasks
 
     def build_tasks_for_target(
@@ -40,9 +48,16 @@ class SecurityReconPlanner:
         request: SecurityTestingRequestState,
         *,
         start_index: int = 1,
+        preferred_profile_keys: list[str] | None = None,
     ) -> list[SecurityTask]:
         surface_type = self.surface_for_target(target)
         profile_keys = self.suggest_profile_keys(surface_type, target, request)
+        recalled_profiles = self._compatible_recalled_profiles(
+            preferred_profile_keys or [],
+            surface_type,
+            request,
+        )
+        profile_keys = list(dict.fromkeys([*recalled_profiles, *profile_keys]))
         tasks: list[SecurityTask] = []
         for offset, profile_key in enumerate(profile_keys):
             profile = self._tool_catalog.get_profile(profile_key)
@@ -65,6 +80,7 @@ class SecurityReconPlanner:
                     resource_locks=[target.value],
                     timeout_seconds=profile.timeout_seconds,
                     max_retries=0 if profile.requires_approval else 1,
+                    refine_origin="memory_recall" if profile_key in recalled_profiles else "",
                     worker_agent_key=resolve_security_worker_agent(
                         surface_type=surface_type,
                         tool_family=tool_family,
@@ -73,6 +89,22 @@ class SecurityReconPlanner:
                 )
             )
         return tasks
+
+    def _compatible_recalled_profiles(
+        self,
+        profile_keys: list[str],
+        surface_type: str,
+        request: SecurityTestingRequestState,
+    ) -> list[str]:
+        compatible: list[str] = []
+        for profile_key in profile_keys:
+            profile = self._tool_catalog.get_profile(profile_key)
+            if profile is None or surface_type not in profile.surface_types:
+                continue
+            if request.risk_tolerance == "low" and profile.risk_level not in {"info", "low"}:
+                continue
+            compatible.append(profile.profile_key)
+        return list(dict.fromkeys(compatible))
 
     def suggest_profile_keys(
         self,
