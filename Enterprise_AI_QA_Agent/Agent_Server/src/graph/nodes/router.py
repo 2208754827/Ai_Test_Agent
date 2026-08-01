@@ -49,6 +49,11 @@ def build_router_node(
             for skill in skill_registry.get_many(resolved_skills)
             for tool_key in skill.tool_keys
         ]
+        agent_skill_tools = [
+            tool_key
+            for skill in skill_registry.get_many(agent.supported_skills)
+            for tool_key in skill.tool_keys
+        ]
         context_bundle = dict(state.get("context_bundle") or {})
         required_capabilities = [
             str(item).strip()
@@ -84,7 +89,7 @@ def build_router_node(
             for item in context_bundle.get("requested_tool_keys", [])
             if str(item).strip()
         ]
-        initial_tool_keys = list(dict.fromkeys(["skill", *loaded_skill_tools, *requested_tool_keys]))
+        initial_tool_keys = list(dict.fromkeys(["skill", *loaded_skill_tools, *agent_skill_tools, *requested_tool_keys]))
         tools = capability_resolver.eligible_tools(
             tools=tool_registry.get_many(initial_tool_keys),
             active_mode_key=state["mode_key"],

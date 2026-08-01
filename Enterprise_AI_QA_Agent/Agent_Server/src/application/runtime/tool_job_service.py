@@ -178,6 +178,9 @@ class ToolJobService:
     ) -> list[ToolArtifactRecord]:
         return await self._store.list_artifacts(session_id=session_id, tool_job_id=tool_job_id)
 
+    async def get_artifact(self, artifact_id: str) -> ToolArtifactRecord | None:
+        return await self._store.get_artifact(artifact_id)
+
     async def list_artifacts_for_sessions(
         self,
         session_ids: list[str],

@@ -849,7 +849,8 @@ def _validate_tool_input(schema: dict[str, Any], arguments: dict[str, Any]) -> l
     errors: list[str] = []
     properties = dict(schema.get("properties") or {})
     for key in schema.get("required") or []:
-        if key not in arguments or arguments.get(key) is None or arguments.get(key) == "" or arguments.get(key) == []:
+        value = arguments.get(key)
+        if key not in arguments or value is None or value == "":
             errors.append(f"Missing required field: {key}")
     for key, value in arguments.items():
         rule = properties.get(key)

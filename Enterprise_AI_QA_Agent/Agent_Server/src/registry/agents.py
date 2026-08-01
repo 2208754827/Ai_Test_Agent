@@ -59,6 +59,7 @@ class AgentRegistry:
                         "observation-search",
                         "knowledge-rag",
                         "test-case-generator",
+                        "test-case-xlsx-exporter",
                         "report-writer",
                     ],
                     supported_skills=["requirements-analysis", "case-design"],

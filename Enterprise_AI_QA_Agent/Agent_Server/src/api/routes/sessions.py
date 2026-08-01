@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from src.runtime.streaming import format_sse
 from src.schemas.session import (
@@ -19,6 +21,29 @@ from src.schemas.tool_job import ToolArtifactRecord, ToolJobDetail, ToolJobRecor
 
 
 router = APIRouter(prefix="/sessions", tags=["sessions"])
+
+_ARTIFACT_MEDIA_TYPES = {
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".xls": "application/vnd.ms-excel",
+    ".csv": "text/csv",
+    ".json": "application/json",
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+    ".md": "text/markdown",
+}
+
+
+def _artifact_media_type(filename: str, fallback: str = "application/octet-stream") -> str:
+    return _ARTIFACT_MEDIA_TYPES.get(Path(filename).suffix.lower(), fallback)
+
+
+def _attachment_header(filename: str) -> str:
+    resolved = filename or "artifact"
+    ascii_name = "".join(
+        character if 32 <= ord(character) < 127 and character not in {'"', "\\", ";"} else "_"
+        for character in resolved
+    ).strip(" ._") or "artifact"
+    return f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{quote(resolved, safe="")}'
 
 
 @router.get("")
@@ -180,6 +205,61 @@ async def list_session_artifacts(session_id: str, request: Request):
     except KeyError as exc:
         raise HTTPException(status_code=404, detail="Session not found") from exc
     return await request.app.state.tool_job_service.list_artifacts(session_id=session_id)
+
+
+@router.get("/{session_id}/artifacts/{artifact_id}/content")
+async def get_session_artifact_content(session_id: str, artifact_id: str, request: Request):
+    try:
+        await request.app.state.session_service.get_session(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+
+    artifact = await request.app.state.tool_job_service.get_artifact(artifact_id)
+    if artifact is None or artifact.session_id != session_id:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    filename = str(artifact.label or Path(artifact.path).name or artifact.id)
+    raw_path = str(artifact.path or "").strip()
+    if raw_path.startswith("minio://"):
+        try:
+            stored = await request.app.state.artifact_storage_service.read_object_uri(raw_path)
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail="Artifact content not available") from exc
+        media_type = str(stored.get("content_type") or "application/octet-stream")
+        if media_type == "application/octet-stream":
+            media_type = _artifact_media_type(filename, media_type)
+        return Response(
+            content=stored.get("content") or b"",
+            media_type=media_type,
+            headers={"Content-Disposition": _attachment_header(filename)},
+        )
+
+    if raw_path and not raw_path.startswith("inline://"):
+        try:
+            local_path = Path(raw_path).resolve()
+            artifact_root = (
+                Path(__file__).resolve().parents[2]
+                / request.app.state.settings.artifact_root_dir
+            ).resolve()
+            if artifact_root != local_path and artifact_root not in local_path.parents:
+                raise HTTPException(status_code=404, detail="Artifact content not available")
+            if local_path.is_file():
+                return Response(
+                    content=local_path.read_bytes(),
+                    media_type=_artifact_media_type(filename),
+                    headers={"Content-Disposition": _attachment_header(filename)},
+                )
+        except (OSError, ValueError):
+            pass
+
+    inline_content = str(artifact.metadata.get("__content_text") or "")
+    if inline_content:
+        return Response(
+            content=inline_content.encode("utf-8"),
+            media_type=_artifact_media_type(filename, "text/plain"),
+            headers={"Content-Disposition": _attachment_header(filename)},
+        )
+    raise HTTPException(status_code=404, detail="Artifact content not available")
 
 
 @router.get("/{session_id}/approvals")

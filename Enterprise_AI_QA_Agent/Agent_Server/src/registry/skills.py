@@ -34,7 +34,7 @@ class SkillRegistry:
                 description="Transforms scenarios into structured QA cases with expected outcomes.",
                 recommended_agents=["qa-planner"],
                 tags=["qa"],
-                tool_keys=["knowledge-rag", "report-writer"],
+                tool_keys=["knowledge-rag", "test-case-generator", "test-case-xlsx-exporter", "report-writer"],
             ),
             "ui-exploration": SkillDescriptor(
                 key="ui-exploration",

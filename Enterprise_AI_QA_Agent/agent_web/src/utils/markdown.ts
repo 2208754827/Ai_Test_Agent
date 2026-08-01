@@ -59,8 +59,17 @@ md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
     token.attrSet("target", "_blank");
     token.attrSet("rel", "noreferrer noopener");
   }
+  if (/^\/api\/v1\/sessions\/[^/]+\/artifacts\/[^/]+\/content$/i.test(href)) {
+    token.attrSet("download", "");
+    token.attrJoin("class", "artifact-download-link");
+  }
   return defaultLinkRender(tokens, idx, options, env, self);
 };
+
+function linkBareArtifactUrls(content: string): string {
+  const pattern = /(^|[\s(：:])(\/api\/v1\/sessions\/[^/\s]+\/artifacts\/[^/\s]+\/content)(?=[\s).,;:!?？。”》、]|$)/g;
+  return content.replace(pattern, (_match, prefix: string, url: string) => `${prefix}[点击下载](${url})`);
+}
 
 /** Strip the internal framework marker before rendering. */
 export function displayAssistantContent(content: string): string {
@@ -69,7 +78,7 @@ export function displayAssistantContent(content: string): string {
 }
 
 export function renderAssistantMarkdown(content: string): string {
-  const source = displayAssistantContent(content);
+  const source = linkBareArtifactUrls(displayAssistantContent(content));
   if (!source) {
     return "";
   }

@@ -472,6 +472,26 @@ class ToolRegistry:
                 ),
                 handler_key="test-case-generator",
             ),
+            "test-case-xlsx-exporter": ToolModule(
+                descriptor=ToolDescriptor(
+                    key="test-case-xlsx-exporter",
+                    name="Test Case XLSX Exporter",
+                    description="Export structured test cases to an xlsx file for download after test-case generation.",
+                    category="qa",
+                    permission_level="safe",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "cases": {"type": "array", "description": "Test case objects to export."},
+                            "feature": {"type": "string", "description": "Feature name used in the filename."},
+                        },
+                        "required": ["cases"],
+                    },
+                    output_schema={"ok": "boolean", "summary": "string", "artifact_path": "string", "case_count": "integer", "artifacts": "array", "error": "string"},
+                    tags=["planning", "qa", "export", "xlsx"],
+                ),
+                handler_key="test-case-xlsx-exporter",
+            ),
             "browser-automation": ToolModule(
                 descriptor=ToolDescriptor(
                     key="browser-automation",

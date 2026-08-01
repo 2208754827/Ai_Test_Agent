@@ -196,6 +196,7 @@ class ToolRuntimeService:
             "observation-search": self._run_observation_search,
             "mcp-bridge": self._run_mcp_bridge,
             "test-case-generator": self._run_test_case_generator,
+            "test-case-xlsx-exporter": self._run_test_case_xlsx_exporter,
             "ui-page-explorer": self._run_ui_page_explorer,
             "dom-inspector": self._run_dom_inspector,
             "browser-automation": self._run_browser_automation,
@@ -401,6 +402,22 @@ class ToolRuntimeService:
                         artifacts=result.get("artifacts", []) if isinstance(result, dict) else [],
                     )
             record_output = self._compact_tool_output_for_model(tool.key, result)
+            if job is not None and self._tool_job_service is not None and resolved_status == "completed":
+                saved_artifacts = await self._tool_job_service.list_artifacts(tool_job_id=job.id)
+                downloads = [
+                    {
+                        "artifact_id": artifact.id,
+                        "label": artifact.label or artifact.path,
+                        "artifact_type": artifact.artifact_type,
+                        "url": f"/api/v1/sessions/{context.session_id}/artifacts/{artifact.id}/content",
+                    }
+                    for artifact in saved_artifacts
+                ]
+                if downloads:
+                    record_output["download_urls"] = downloads
+                    record_output["download_markdown"] = "\n".join(
+                        f"[点击下载 {item['label']}]({item['url']})" for item in downloads
+                    )
             return ToolExecutionRecord(
                 call_id=call.id,
                 tool_key=tool.key,
@@ -758,6 +775,84 @@ class ToolRuntimeService:
                 "requirement_count": len(requirements),
                 "acceptance_criteria_count": len(acceptance_criteria),
             },
+        }
+
+    async def _run_test_case_xlsx_exporter(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> dict[str, Any]:
+        cases = arguments.get("cases") or []
+        feature = str(arguments.get("feature") or "test_cases").strip()
+        if not cases:
+            return {
+                "status": "failed",
+                "ok": False,
+                "summary": "No test cases provided for xlsx export.",
+                "artifacts": [],
+                "metrics": {"case_count": 0},
+                "error": "missing_cases",
+            }
+
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "Test Cases"
+        headers = [
+            "ID", "Title", "Type", "Priority", "Platforms",
+            "Preconditions", "Steps", "Expected Results", "Assertions", "Risk Focus",
+        ]
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF")
+        for column, header in enumerate(headers, start=1):
+            cell = worksheet.cell(row=1, column=column, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+
+        for case in cases:
+            if not isinstance(case, dict):
+                continue
+            steps = case.get("steps") if isinstance(case.get("steps"), list) else []
+            worksheet.append([
+                case.get("id", ""),
+                case.get("title", ""),
+                case.get("type", ""),
+                case.get("priority", ""),
+                ", ".join(_to_string_list(case.get("platforms"))),
+                "\n".join(_to_string_list(case.get("preconditions"))),
+                "\n".join(
+                    f"{step.get('step', index)}. {step.get('action', '')}"
+                    for index, step in enumerate(steps, start=1)
+                    if isinstance(step, dict)
+                ),
+                "\n".join(
+                    str(step.get("expected") or "")
+                    for step in steps
+                    if isinstance(step, dict) and step.get("expected")
+                ),
+                "\n".join(_to_string_list(case.get("assertions"))),
+                ", ".join(_to_string_list(case.get("risk_focus"))),
+            ])
+
+        for column_cells in worksheet.columns:
+            max_length = max(len(str(cell.value or "")) for cell in column_cells)
+            worksheet.column_dimensions[column_cells[0].column_letter].width = min(max_length + 2, 50)
+
+        artifact_dir = self._prepare_local_artifact_dir(context, "test-case-xlsx-exporter")
+        safe_feature = _slug(feature)[:60] or "test_cases"
+        xlsx_path = artifact_dir / f"{safe_feature}_test_cases.xlsx"
+        workbook.save(xlsx_path)
+        return {
+            "status": "completed",
+            "ok": True,
+            "summary": f"Exported {len(cases)} test cases to '{xlsx_path.name}'.",
+            "artifact_path": str(xlsx_path),
+            "case_count": len(cases),
+            "artifacts": [{"type": "test_cases_xlsx", "label": xlsx_path.name, "path": str(xlsx_path)}],
+            "metrics": {"case_count": len(cases)},
         }
 
     async def _run_attachment_reader(
