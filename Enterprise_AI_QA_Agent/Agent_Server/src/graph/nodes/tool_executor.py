@@ -468,8 +468,17 @@ async def _resolve_tool_call(
                 "permission_visibility": str((permission_decision or {}).get("visibility") or "visible"),
                 "permission_reason_code": permission_reason_code,
                 "permission_policy_key": permission_policy_key,
+                "approval_mode_key": (
+                    "security_tool_bootstrap"
+                    if tool.key == "security-tool-bootstrap"
+                    else str(state.get("mode_key") or "default")
+                ),
                 "approval_scope_hash": ApprovalScopeService().build_hash(
-                    mode_key=str(state.get("mode_key") or "default"),
+                    mode_key=(
+                        "security_tool_bootstrap"
+                        if tool.key == "security-tool-bootstrap"
+                        else str(state.get("mode_key") or "default")
+                    ),
                     tool_key=tool.key,
                     arguments=tool_call.arguments,
                     context=state.get("context_bundle") or {},

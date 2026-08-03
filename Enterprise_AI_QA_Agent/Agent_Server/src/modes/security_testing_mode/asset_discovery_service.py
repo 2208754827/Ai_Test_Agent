@@ -74,6 +74,12 @@ class SecurityAssetDiscoveryService:
                 for finding in task_findings:
                     if not str(finding.affected_target or "").strip():
                         finding.affected_target = task.target
+                    evidence_ids = [
+                        item.artifact_id
+                        for item in campaign.evidence
+                        if item.source_task_id == task.task_id
+                    ]
+                    finding.evidence_ids = evidence_ids
                 findings.extend(task_findings)
             if parser_key == "nmap":
                 self.append_nmap_assets(parsed, task, fingerprints, assets)

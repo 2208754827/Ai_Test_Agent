@@ -56,7 +56,11 @@ class FindingNormalizer:
                 evidence_summary=f"nmap 扫描结果: {port}/{port_info.get('protocol', 'tcp')} {service} {version}",
                 recommendation=recommendation,
                 source_task_ids=[task_id] if task_id else [],
-                verified=True,
+                verification_level="observed",
+                reproduction_steps=[
+                    f"Run the authorized nmap profile against {host or '<target>'}.",
+                    f"Confirm {port}/{port_info.get('protocol', 'tcp')} is reported open.",
+                ],
             ))
         return findings
 
@@ -77,7 +81,11 @@ class FindingNormalizer:
                 evidence_summary=f"Nuclei 模板 {item.get('template_id', '')} 触发",
                 references=item.get("reference") or [],
                 source_task_ids=[task_id] if task_id else [],
-                verified=True,
+                verification_level="confirmed",
+                reproduction_steps=[
+                    f"Run the same Nuclei template against {item.get('url') or '<target>'}.",
+                    "Compare the response with the template matcher and preserve the raw hit as evidence.",
+                ],
             ))
         return findings
 
@@ -102,6 +110,11 @@ class FindingNormalizer:
                 recommendation="使用参数化查询或预编译语句，对所有用户输入进行严格验证",
                 source_task_ids=[task_id] if task_id else [],
                 verified=True,
+                verification_level="exploitable",
+                reproduction_steps=[
+                    f"Send the recorded SQL injection probe to parameter {injection.get('parameter', '')}.",
+                    "Verify the response demonstrates controlled query behavior without modifying data.",
+                ],
             ))
         return findings
 
@@ -125,14 +138,25 @@ class FindingNormalizer:
                 description=desc,
                 evidence_summary=f"nikto 扫描结果: {desc}",
                 source_task_ids=[task_id] if task_id else [],
+                reproduction_steps=[
+                    f"Run the authorized Nikto profile against {parsed.get('target') or '<target>'}.",
+                    "Verify the same response or configuration signal is present.",
+                ],
             ))
         return findings
 
     def from_http_headers(
-        self, headers: dict[str, str], target: str = "", task_id: str = ""
+        self,
+        headers: dict[str, str],
+        target: str = "",
+        task_id: str = "",
+        *,
+        status_code: int | None = None,
     ) -> list[FindingRecord]:
         """Check HTTP response headers for security issues."""
         findings: list[FindingRecord] = []
+        if not isinstance(status_code, int) or not 100 <= status_code <= 599:
+            return findings
         security_headers = {
             "x-frame-options": "缺少 X-Frame-Options 响应头",
             "x-content-type-options": "缺少 X-Content-Type-Options 响应头",
@@ -149,11 +173,30 @@ class FindingNormalizer:
                     surface_type="web",
                     severity="low",
                     confidence="confirmed",
+                    cvss_score=0.0,
+                    cvss_vector="CVSS:3.1/AV:N/AC:H/PR:N/UI:R/S:U/C:N/I:N/A:N",
+                    cvss_rationale=(
+                        "The missing response control is confirmed, but this baseline check did not "
+                        "demonstrate exploitation or CIA impact; C/I/A remain None."
+                    ),
+                    cwe_ids=(
+                        ["CWE-693", "CWE-1021"]
+                        if header == "x-frame-options"
+                        else ["CWE-693"]
+                    ),
+                    owasp_categories=["OWASP-A05:2021-Security-Misconfiguration"],
                     affected_target=target,
                     description=f"HTTP 响应中缺少安全响应头: {header}",
+                    evidence_summary=(
+                        f"HTTP {status_code} response from {target or '<target>'} omitted {header}."
+                    ),
                     recommendation=f"在服务器配置中添加 {header} 响应头",
                     source_task_ids=[task_id] if task_id else [],
-                    verified=True,
+                    verification_level="confirmed",
+                    reproduction_steps=[
+                        f"Send an authorized GET request to {target or '<target>'}.",
+                        f"Confirm HTTP {status_code} does not include the {header} response header.",
+                    ],
                     # Trivially-verifiable hardening hint; do not let the
                     # severity evaluator promote this to medium just because
                     # missing_control + verified happens to compute > 4.0.
@@ -166,6 +209,7 @@ class FindingNormalizer:
             parsed.get("headers") if isinstance(parsed.get("headers"), dict) else {},
             target=str(parsed.get("url") or ""),
             task_id=task_id,
+            status_code=parsed.get("status_code") if isinstance(parsed.get("status_code"), int) else None,
         )
 
     def from_hydra(self, parsed: dict[str, Any], task_id: str = "") -> list[FindingRecord]:
@@ -185,6 +229,11 @@ class FindingNormalizer:
                 recommendation="立即修改弱密码，启用账户锁定策略，考虑使用多因素认证",
                 source_task_ids=[task_id] if task_id else [],
                 verified=True,
+                verification_level="exploitable",
+                reproduction_steps=[
+                    f"Replay the authorized credential check for {cred.get('service', '')}.",
+                    "Confirm access succeeds and immediately revoke or rotate the test credential.",
+                ],
             ))
         return findings
 

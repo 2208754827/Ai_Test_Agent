@@ -26,11 +26,15 @@ from src.modes.security_testing_mode.output_compaction import (
 from src.modes.security_testing_mode.prompt_contract import build_security_worker_prompt
 from src.modes.security_testing_mode.task_pool import SecurityTaskPool
 from src.modes.security_testing_mode.subtask_refiner import SecuritySubtaskRefiner
+from src.modes.security_testing_mode.scenario_incremental_planner import (
+    SecurityScenarioIncrementalPlanner,
+)
 
 logger = logging.getLogger("uvicorn.error.security_testing_mode.coordinator")
 
 CheckpointCallback = Callable[[str, SecurityTask, list[SecurityTask]], None]
 InterruptCheck = Callable[[], bool]
+BatchHydrator = Callable[[list[SecurityTask]], None]
 
 
 # Phrases that indicate the target platform cannot be tested further without
@@ -86,6 +90,10 @@ class SecuritySubagentCoordinator:
         max_reflect_attempts: int = 3,
         output_summary_threshold_bytes: int = DEFAULT_THRESHOLD_BYTES,
         task_refiner: SecuritySubtaskRefiner | None = None,
+        scenario_incremental_planner: SecurityScenarioIncrementalPlanner | None = None,
+        campaign: Any = None,
+        request: Any = None,
+        batch_hydrator: BatchHydrator | None = None,
         interrupt_check: InterruptCheck | None = None,
     ) -> None:
         self._pool = pool
@@ -102,6 +110,10 @@ class SecuritySubagentCoordinator:
         self._max_reflect_attempts = max(0, max_reflect_attempts)
         self._output_summary_threshold_bytes = max(0, output_summary_threshold_bytes)
         self._task_refiner = task_refiner or SecuritySubtaskRefiner()
+        self._scenario_incremental_planner = scenario_incremental_planner
+        self._campaign = campaign
+        self._request = request
+        self._batch_hydrator = batch_hydrator
         self._refinement_pass = 0
         self._interrupt_check = interrupt_check
         self._interrupted = False
@@ -186,14 +198,74 @@ class SecuritySubagentCoordinator:
     def _refine_after_batch(self, settled_tasks: list[SecurityTask]) -> None:
         self._refinement_pass += 1
         refinement_id = f"batch_{self._refinement_pass}"
+        if self._batch_hydrator is not None:
+            try:
+                self._batch_hydrator(settled_tasks)
+            except Exception:
+                logger.exception(
+                    "security_scenario_batch_hydration_failed %s",
+                    self._log_payload(refinement_id=refinement_id),
+                )
+        scenario_result: dict[str, Any] = {}
+        if (
+            self._scenario_incremental_planner is not None
+            and self._campaign is not None
+            and self._request is not None
+        ):
+            scenario_result = self._scenario_incremental_planner.replan(
+                campaign=self._campaign,
+                request=self._request,
+                pool=self._pool,
+                refinement_id=refinement_id,
+            )
+            if scenario_result.get("replanned"):
+                logger.info(
+                    "security.scenario.replanned %s",
+                    self._log_payload(
+                        refinement_id=refinement_id,
+                        previous_scenario_id=scenario_result.get("previous_scenario_id"),
+                        scenario_id=scenario_result.get("scenario_id"),
+                        previous_product_type=scenario_result.get("previous_product_type"),
+                        product_type=scenario_result.get("product_type"),
+                        new_observed_facts=scenario_result.get("new_observed_facts"),
+                        changed_dimensions=scenario_result.get("changed_dimensions"),
+                        added_task_ids=scenario_result.get("added_task_ids"),
+                        removed_task_ids=scenario_result.get("removed_task_ids"),
+                        updated_task_ids=scenario_result.get("updated_task_ids"),
+                    ),
+                )
+                self._activities.append(
+                    AgentActivityRecord(
+                        activity_id=f"scenario_replan_{refinement_id}",
+                        agent_key="security-scenario-incremental-planner",
+                        agent_name="security-scenario-incremental-planner",
+                        action="scenario_replanned",
+                        summary=(
+                            f"Scenario changed from {scenario_result.get('previous_product_type')} "
+                            f"to {scenario_result.get('product_type')}; "
+                            f"added={len(scenario_result.get('added_task_ids') or [])}, "
+                            f"removed={len(scenario_result.get('removed_task_ids') or [])}, "
+                            f"updated={len(scenario_result.get('updated_task_ids') or [])}."
+                        ),
+                        completed_at=datetime.now(timezone.utc).isoformat(),
+                        execution_mode="scheduler",
+                    )
+                )
         result = self._task_refiner.refine_task_pool(
             pool=self._pool,
             settled_tasks=settled_tasks,
             refinement_id=refinement_id,
         )
-        added = list(result.get("added_tasks") or [])
-        removed = list(result.get("removed_tasks") or [])
-        if not added and not removed:
+        added = [
+            *(scenario_result.get("added_tasks") or []),
+            *(result.get("added_tasks") or []),
+        ]
+        removed = [
+            *(scenario_result.get("removed_tasks") or []),
+            *(result.get("removed_tasks") or []),
+        ]
+        updated = list(scenario_result.get("updated_tasks") or [])
+        if not added and not removed and not updated:
             return
         logger.info(
             "security_refiner_applied %s",
@@ -201,6 +273,7 @@ class SecuritySubagentCoordinator:
                 refinement_id=refinement_id,
                 added_task_ids=[task.task_id for task in added],
                 removed_task_ids=[task.task_id for task in removed],
+                updated_task_ids=[task.task_id for task in updated],
                 task_count=self._pool.task_count,
             ),
         )
@@ -626,7 +699,9 @@ class SecuritySubagentCoordinator:
                     f"APPROACH CHANGE REQUIRED: the {family or 'previous'} approach"
                     + (f" (runner {runner_key})" if runner_key else "")
                     + f" failed {count} time(s). Do not repeat the same failing profile/command. "
-                    "Try a materially different in-scope technique or return a clear limitation. "
+                    "Do not change the assigned command_profile inside the current task; "
+                    "return a structured failure so the Refiner can create a separately tracked alternative. "
+                    "Try a materially different in-scope technique only when it is dispatched as a new task. "
                     "Reference, not mandate: if this approach keeps failing in this environment, abandon it."
                 )
                 self._mentor_directives[family] = directive
@@ -738,6 +813,32 @@ class SecuritySubagentCoordinator:
 
     def _apply_worker_output(self, task: SecurityTask, tool_output: dict[str, Any]) -> None:
         """Apply structured worker output to the task."""
+        reported_profile = str(tool_output.get("command_profile") or "").strip()
+        if reported_profile and reported_profile != task.command_profile:
+            # A model may choose an alternative tool after a failure, but that
+            # is a new route and must not rewrite the identity of the task it
+            # was assigned. Keeping this task failed preserves auditability and
+            # lets the Refiner create an explicit alternative task.
+            task.result_summary = (
+                f"Worker executed profile {reported_profile}, but task was assigned "
+                f"{task.command_profile}. Alternative profile was not accepted."
+            )
+            task.failure_analysis = {
+                "failure_category": "profile_identity_mismatch",
+                "root_cause": task.result_summary,
+                "retryable": False,
+                "alternative_profile": reported_profile,
+            }
+            self._fail_task(task, task.result_summary)
+            logger.warning(
+                "security_task_profile_identity_mismatch %s",
+                self._log_payload(
+                    task_id=task.task_id,
+                    assigned_profile=task.command_profile,
+                    reported_profile=reported_profile,
+                ),
+            )
+            return
         task.result_summary = str(tool_output.get("summary") or "")
         # S4: preserve ports/CVE/URL/vuln signals instead of a blind head cut.
         task.raw_output = compact_security_output(

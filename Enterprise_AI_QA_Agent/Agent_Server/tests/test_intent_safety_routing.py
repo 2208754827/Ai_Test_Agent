@@ -31,7 +31,15 @@ from src.registry.models import ModelRegistry
 from src.registry.tools import ToolRegistry
 from src.runtime.control import RuntimeControlRegistry
 from src.runtime.store import InMemorySessionStore
-from src.schemas.session import ExecutionRequest, MessageKind, RuntimeMode, SendMessageRequest, SessionMode, SessionStatus
+from src.schemas.session import (
+    ExecutionRequest,
+    MessageKind,
+    RuntimeMode,
+    SendMessageRequest,
+    SessionMode,
+    SessionStatus,
+    ToolApprovalRequest,
+)
 from src.schemas.tool_runtime import ModelToolCall, ToolExecutionRecord
 
 
@@ -925,6 +933,228 @@ def test_resume_after_approval_injects_server_marker_before_tool_execution():
     assert result.snapshot.stage == "waiting_approval"
     assert tool_runtime.calls[0].arguments["_server_approval_granted"] is True
     assert "_server_approval_granted" not in arguments
+
+
+def test_p4_approval_has_dedicated_scope_and_resume_injects_p4_marker():
+    tool_runtime = _CapturingToolRuntime()
+    runtime = _runtime_service(tool_runtime)
+    session = _session("security_testing")
+    request = ExecutionRequest(
+        turn_id="turn-p4",
+        session_id=session.id,
+        user_message="prepare approved tcpdump readiness for http://localhost:8089",
+        normalized_input="prepare approved tcpdump readiness for http://localhost:8089",
+        mode_key="security_testing",
+        context={
+            "safety_assessment": {"decision": "allow", "authorization_status": "verified"},
+            "trusted_security_authorization": {
+                "status": "verified",
+                "targets": ["http://localhost:8089"],
+            },
+        },
+    )
+    state = runtime._build_initial_state(session, request)
+    arguments = {
+        "bootstrap_mode": "security_tool_bootstrap",
+        "campaign_id": "campaign-p4",
+        "target_allowlist": ["http://localhost:8089"],
+        "profile_key": "tcpdump_timed_capture",
+        "tool_name": "tcpdump",
+        "package_name": "tcpdump",
+        "requested_version": "",
+        "image_ref": "vxcontrol/kali-linux",
+        "repository_id": "kali-rolling",
+        "network_name": "none",
+        "command_template_id": "apt-get-v1",
+        "timeout_seconds": 60,
+    }
+    approval_id = "approval-p4"
+    state["pending_approvals"] = [{"id": approval_id}]
+    state["control_state"] = "waiting_approval"
+    state["termination_reason"] = "waiting_approval"
+    session.metadata["pending_turn"] = runtime._build_pending_turn(
+        state,
+        stage="waiting_approval",
+    )
+    scope_hash = ApprovalScopeService().build_hash(
+        mode_key="security_tool_bootstrap",
+        tool_key="security-tool-bootstrap",
+        arguments=arguments,
+        context=request.context,
+    )
+    scan_scope = ApprovalScopeService().build_hash(
+        mode_key="security_testing",
+        tool_key="security-scan-runner",
+        arguments={"target_url": "http://localhost:8089"},
+        context=request.context,
+    )
+
+    result = asyncio.run(
+        runtime.resume_after_approval(
+            session,
+            {
+                "id": approval_id,
+                "status": "approved",
+                "tool_key": "security-tool-bootstrap",
+                "tool_name": "Security Tool Bootstrap",
+                "metadata": {
+                    "call_id": "call-p4",
+                    "arguments": arguments,
+                    "approval_scope_hash": scope_hash,
+                    "approval_mode_key": "security_tool_bootstrap",
+                },
+            },
+        )
+    )
+
+    assert result is not None
+    assert scope_hash != scan_scope
+    assert tool_runtime.calls[0].arguments["_server_approval_granted"] is True
+    assert tool_runtime.calls[0].arguments["_p4_approval_scope_hash"] == scope_hash
+    assert result.state["termination_reason"] != "waiting_approval"
+    assert result.snapshot.stage == "completed"
+
+
+def test_p4_waiting_approval_satisfies_session_approval_contract():
+    runtime = _runtime_service(_CapturingToolRuntime())
+    session = _session("security_testing")
+    request = ExecutionRequest(
+        turn_id="turn-p4-contract",
+        session_id=session.id,
+        user_message="prepare tcpdump readiness",
+        normalized_input="prepare tcpdump readiness",
+        mode_key="security_testing",
+        context={},
+    )
+    state = runtime._build_initial_state(session, request)
+    arguments = {
+        "bootstrap_mode": "security_tool_bootstrap",
+        "campaign_id": "campaign-p4",
+        "target_allowlist": ["http://localhost:8089"],
+        "profile_key": "tcpdump_timed_capture",
+        "tool_name": "tcpdump",
+        "package_name": "tcpdump",
+        "requested_version": "",
+        "image_ref": "vxcontrol/kali-linux",
+        "repository_id": "kali-rolling",
+        "network_name": "none",
+        "command_template_id": "apt-get-v1",
+        "timeout_seconds": 60,
+    }
+
+    result = runtime._build_security_bootstrap_waiting_approval(
+        session=session,
+        request=request,
+        state=state,
+        arguments=arguments,
+    )
+
+    approval = ToolApprovalRequest.model_validate(result.approvals[0])
+    assert approval.created_at is not None
+    assert approval.metadata["approval_mode_key"] == "security_tool_bootstrap"
+
+
+def test_p4_approval_rejects_mutated_package_before_tool_execution():
+    tool_runtime = _CapturingToolRuntime()
+    runtime = _runtime_service(tool_runtime)
+    session = _session("security_testing")
+    request = ExecutionRequest(
+        turn_id="turn-p4-mutation",
+        session_id=session.id,
+        user_message="prepare approved tcpdump readiness for http://localhost:8089",
+        normalized_input="prepare approved tcpdump readiness for http://localhost:8089",
+        mode_key="security_testing",
+        context={
+            "safety_assessment": {"decision": "allow", "authorization_status": "verified"},
+        },
+    )
+    state = runtime._build_initial_state(session, request)
+    original_arguments = {
+        "bootstrap_mode": "security_tool_bootstrap",
+        "campaign_id": "campaign-p4",
+        "target_allowlist": ["http://localhost:8089"],
+        "profile_key": "tcpdump_timed_capture",
+        "tool_name": "tcpdump",
+        "package_name": "tcpdump",
+        "requested_version": "",
+        "image_ref": "vxcontrol/kali-linux",
+        "repository_id": "kali-rolling",
+        "network_name": "none",
+        "command_template_id": "apt-get-v1",
+        "timeout_seconds": 60,
+    }
+    approval_id = "approval-p4-mutation"
+    state["pending_approvals"] = [{"id": approval_id}]
+    state["control_state"] = "waiting_approval"
+    state["termination_reason"] = "waiting_approval"
+    session.metadata["pending_turn"] = runtime._build_pending_turn(
+        state,
+        stage="waiting_approval",
+    )
+    scope_hash = ApprovalScopeService().build_hash(
+        mode_key="security_tool_bootstrap",
+        tool_key="security-tool-bootstrap",
+        arguments=original_arguments,
+        context=request.context,
+    )
+    mutated_arguments = {**original_arguments, "package_name": "metasploit-framework"}
+
+    result = asyncio.run(
+        runtime.resume_after_approval(
+            session,
+            {
+                "id": approval_id,
+                "status": "approved",
+                "tool_key": "security-tool-bootstrap",
+                "tool_name": "Security Tool Bootstrap",
+                "metadata": {
+                    "call_id": "call-p4-mutated",
+                    "arguments": mutated_arguments,
+                    "approval_scope_hash": scope_hash,
+                    "approval_mode_key": "security_tool_bootstrap",
+                },
+            },
+        )
+    )
+
+    assert result is not None
+    assert tool_runtime.calls == []
+    assert result.state["tool_results"][-1]["output"]["error"] == "approval_scope_mismatch"
+
+
+def test_p4_out_of_scope_target_is_denied_by_dedicated_runtime_before_model_execution():
+    tool_runtime = _CapturingToolRuntime()
+    runtime = _runtime_service(tool_runtime)
+    session = _session("security_testing")
+    request = ExecutionRequest(
+        turn_id="turn-p4-out-of-scope",
+        session_id=session.id,
+        user_message="prepare tcpdump readiness for http://localhost:3000",
+        normalized_input="prepare tcpdump readiness for http://localhost:3000",
+        mode_key="security_testing",
+        context={
+            "trusted_security_runtime_direct_execution": True,
+            "safety_assessment": {"authorization_status": "not_required"},
+            "trusted_security_authorization": {
+                "status": "verified",
+                "targets": ["http://localhost:8089"],
+            },
+            "security_tool_bootstrap_request": {
+                "requested": True,
+                "target": "http://localhost:3000",
+                "profile_key": "tcpdump_timed_capture",
+                "tool_name": "tcpdump",
+            },
+        },
+    )
+
+    result = asyncio.run(runtime.execute_turn(session, request))
+
+    assert result.approvals == []
+    assert tool_runtime.calls == []
+    assert result.state["tool_results"][-1]["status"] == "denied"
+    assert result.state["tool_results"][-1]["output"]["error"] == "target_out_of_scope"
+    assert any(event.type == "security.tool_bootstrap.denied" for event in result.events)
 
 
 def test_dedicated_security_runtime_preserves_interrupted_snapshot_status():

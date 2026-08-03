@@ -20,6 +20,29 @@ class BaseSecurityParser:
         raise NotImplementedError
 
 
+def evaluate_parser_success(
+    parser_key: str,
+    parsed: dict[str, Any],
+    *,
+    exit_code: int | None,
+    timed_out: bool,
+) -> tuple[bool, str]:
+    """Require positive protocol evidence for response-oriented profiles."""
+    if timed_out:
+        return False, "execution_timeout"
+    if exit_code != 0:
+        return False, f"exit_code={exit_code}"
+    if parser_key in {"httpx", "whatweb"}:
+        results = parsed.get("results")
+        if not isinstance(results, list) or not results:
+            return False, "target_response_not_observed"
+    if parser_key == "http_headers":
+        status_code = parsed.get("status_code")
+        if not isinstance(status_code, int) or not 100 <= status_code <= 599:
+            return False, "target_response_not_observed"
+    return True, ""
+
+
 # ---------------------------------------------------------------------------
 # Nmap
 # ---------------------------------------------------------------------------
@@ -125,11 +148,14 @@ class WhatwebParser(BaseSecurityParser):
         results: list[dict[str, Any]] = []
 
         for line in raw_output.splitlines():
-            line = line.strip()
+            # WhatWeb enables ANSI styling by default in the Kali image. The
+            # control sequences split the URL/status tokens and previously
+            # made a reachable target look semantically unreachable.
+            line = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line).strip()
             if not line or line.startswith("#"):
                 continue
             # URL [status] [tech1, tech2, ...]
-            url_match = re.match(r"(https?://\S+)\s+\[(\d+)\s+\w+\]\s*(.*)", line)
+            url_match = re.match(r"(https?://\S+)\s+\[(\d+)\s+[^\]]+\]\s*(.*)", line)
             if url_match:
                 url = url_match.group(1)
                 status = int(url_match.group(2))
@@ -572,6 +598,7 @@ def get_parser_registry() -> SecurityResultParserRegistry:
 
 
 __all__ = [
+    "evaluate_parser_success",
     "BaseSecurityParser",
     "NmapParser",
     "HttpxParser",

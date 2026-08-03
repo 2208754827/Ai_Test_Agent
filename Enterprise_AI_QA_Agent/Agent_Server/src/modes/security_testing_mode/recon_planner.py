@@ -5,9 +5,11 @@ from src.application.security.risk_policy import SecurityRiskPolicy
 from src.application.security.tool_catalog import SecurityToolCatalog
 from src.modes.security_testing_mode.agent import resolve_security_worker_agent
 from src.modes.security_testing_mode.campaign_state import (
+    SecurityScenarioProfile,
     SecurityTask,
     SecurityTestingRequestState,
     TargetCandidate,
+    ThreatHypothesis,
 )
 from src.modes.security_testing_mode.contracts import FAMILY_GENERAL_SCAN
 
@@ -29,6 +31,8 @@ class SecurityReconPlanner:
         targets: list[TargetCandidate],
         request: SecurityTestingRequestState,
         preferred_profile_keys: list[str] | None = None,
+        scenario_profile: SecurityScenarioProfile | None = None,
+        threat_hypotheses: list[ThreatHypothesis] | None = None,
     ) -> list[SecurityTask]:
         tasks: list[SecurityTask] = []
         for target in targets:
@@ -38,6 +42,8 @@ class SecurityReconPlanner:
                     request,
                     start_index=len(tasks) + 1,
                     preferred_profile_keys=preferred_profile_keys,
+                    scenario_profile=scenario_profile,
+                    threat_hypotheses=threat_hypotheses,
                 )
             )
         return tasks
@@ -49,9 +55,20 @@ class SecurityReconPlanner:
         *,
         start_index: int = 1,
         preferred_profile_keys: list[str] | None = None,
+        scenario_profile: SecurityScenarioProfile | None = None,
+        threat_hypotheses: list[ThreatHypothesis] | None = None,
     ) -> list[SecurityTask]:
-        surface_type = self.surface_for_target(target)
-        profile_keys = self.suggest_profile_keys(surface_type, target, request)
+        surface_type = (
+            "api"
+            if scenario_profile is not None and scenario_profile.product_type == "api"
+            else self.surface_for_target(target)
+        )
+        profile_keys = self.suggest_profile_keys(
+            surface_type,
+            target,
+            request,
+            scenario_profile=scenario_profile,
+        )
         recalled_profiles = self._compatible_recalled_profiles(
             preferred_profile_keys or [],
             surface_type,
@@ -86,8 +103,30 @@ class SecurityReconPlanner:
                         tool_family=tool_family,
                         command_profile=profile.profile_key,
                     ),
+                    planning_rationale=self._planning_rationale(
+                        profile.profile_key,
+                        scenario_profile,
+                        threat_hypotheses or [],
+                    ),
+                    scenario_fact_refs=[
+                        fact.fact_id for fact in (scenario_profile.facts if scenario_profile else [])
+                    ],
+                    threat_hypothesis_ids=[
+                        threat.threat_id for threat in (threat_hypotheses or [])
+                    ],
                 )
             )
+        # The first HTTP/technology probe acts as a batch boundary.  Remaining
+        # tasks wait for its evidence so an observed product/API/auth change
+        # can be reconciled before stale work is dispatched.
+        discovery_task = next(
+            (item for item in tasks if item.command_profile == "httpx_probe"),
+            None,
+        )
+        if discovery_task is not None:
+            for task in tasks:
+                if task.task_id != discovery_task.task_id and not task.depends_on:
+                    task.depends_on = [discovery_task.task_id]
         return tasks
 
     def _compatible_recalled_profiles(
@@ -111,9 +150,19 @@ class SecurityReconPlanner:
         surface_type: str,
         target: TargetCandidate,
         request: SecurityTestingRequestState,
+        *,
+        scenario_profile: SecurityScenarioProfile | None = None,
     ) -> list[str]:
         if surface_type in {"web", "api"}:
-            profiles = ["httpx_probe", "whatweb_fingerprint", "http_headers_probe"]
+            product_type = scenario_profile.product_type if scenario_profile is not None else "unknown"
+            if product_type == "api":
+                profiles = ["httpx_probe", "http_headers_probe"]
+            elif product_type == "admin":
+                profiles = ["http_headers_probe", "httpx_probe", "whatweb_fingerprint"]
+            elif product_type in {"ecommerce", "payment"}:
+                profiles = ["httpx_probe", "http_headers_probe", "whatweb_fingerprint"]
+            else:
+                profiles = ["httpx_probe", "whatweb_fingerprint", "http_headers_probe"]
             if request.risk_tolerance in {"medium", "high"}:
                 profiles.append("nuclei_baseline")
             if target.protocol == "https":
@@ -122,6 +171,21 @@ class SecurityReconPlanner:
         if surface_type == "service":
             return ["sslscan_tls_audit"]
         return ["nmap_tcp_basic"]
+
+    def _planning_rationale(
+        self,
+        profile_key: str,
+        scenario: SecurityScenarioProfile | None,
+        threats: list[ThreatHypothesis],
+    ) -> str:
+        if scenario is None:
+            return "Baseline profile selected from the target surface and risk tolerance."
+        techniques = [threat.technique for threat in threats[:3] if threat.technique]
+        basis = "; ".join(techniques) or "baseline target discovery"
+        return (
+            f"Profile {profile_key} is a low-risk check for the {scenario.product_type} scenario; "
+            f"planning basis: {basis}. Unknowns remain constraints, not confirmed facts."
+        )
 
     def surface_for_target(self, target: TargetCandidate) -> str:
         if target.target_type == "url":

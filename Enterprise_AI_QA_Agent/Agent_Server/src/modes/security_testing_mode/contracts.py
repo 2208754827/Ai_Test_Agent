@@ -16,8 +16,13 @@ PHASE_REQUEST_RESOLVED = "request_resolved"
 PHASE_TARGET_DISCOVERED = "target_discovered"
 PHASE_SCOPE_CONFIRMED = "scope_confirmed"
 PHASE_ASSET_DISCOVERED = "asset_discovered"
+PHASE_SCENARIO_ANALYZED = "scenario_analyzed"
 PHASE_RECON_RUNNING = "recon_running"
 PHASE_RECON_COMPLETE = "recon_complete"
+PHASE_HYPOTHESIS_PLANNING = "hypothesis_planning"
+PHASE_ATTACK_LOOP = "attack_loop"
+PHASE_VERIFICATION_COMPLETE = "verification_complete"
+PHASE_BUG_TRACKING = "bug_tracking"
 PHASE_AUTH_PREPARED = "auth_prepared"
 PHASE_ATTACK_PLAN_READY = "attack_plan_ready"
 PHASE_TASK_DISPATCHING = "task_dispatching"
@@ -34,8 +39,13 @@ SecurityTestingPhase = Literal[
     "target_discovered",
     "scope_confirmed",
     "asset_discovered",
+    "scenario_analyzed",
     "recon_running",
     "recon_complete",
+    "hypothesis_planning",
+    "attack_loop",
+    "verification_complete",
+    "bug_tracking",
     "auth_prepared",
     "attack_plan_ready",
     "task_dispatching",
@@ -194,8 +204,13 @@ __all__ = [
     "PHASE_TARGET_DISCOVERED",
     "PHASE_SCOPE_CONFIRMED",
     "PHASE_ASSET_DISCOVERED",
+    "PHASE_SCENARIO_ANALYZED",
     "PHASE_RECON_RUNNING",
     "PHASE_RECON_COMPLETE",
+    "PHASE_HYPOTHESIS_PLANNING",
+    "PHASE_ATTACK_LOOP",
+    "PHASE_VERIFICATION_COMPLETE",
+    "PHASE_BUG_TRACKING",
     "PHASE_AUTH_PREPARED",
     "PHASE_ATTACK_PLAN_READY",
     "PHASE_TASK_DISPATCHING",

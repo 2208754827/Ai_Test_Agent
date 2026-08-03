@@ -66,6 +66,15 @@ class ExecutionSafetyPolicy:
             )
         verified_low_risk_security_profile = False
         if active_mode_key == "security_testing" and tool.owner_mode_key == "security_testing":
+            if tool.key == "security-tool-bootstrap":
+                return ToolSafetyDecision(
+                    behavior="ask",
+                    reason=(
+                        "P4 temporary security-tool readiness requires a dedicated approval "
+                        "for its exact campaign, package, image, repository and target scope."
+                    ),
+                    reason_code="security_tool_bootstrap_approval_required",
+                )
             task = arguments.get("task")
             task_data = task if isinstance(task, dict) else {}
             profile_key = str(

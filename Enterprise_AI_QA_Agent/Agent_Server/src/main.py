@@ -24,6 +24,7 @@ from src.api.routes.oauth import router as oauth_router
 from src.api.routes.reports import router as reports_router
 from src.api.routes.registry import router as registry_router
 from src.api.routes.sessions import router as sessions_router
+from src.api.routes.security_bugs import router as security_bugs_router
 from src.api.routes.settings import router as settings_router
 from src.api.routes.task_pool import router as task_pool_router
 from src.api.routes.mail import router as mail_router
@@ -72,6 +73,8 @@ from src.infrastructure.channel_config_store import MySQLChannelConfigStore
 from src.infrastructure.email_config_store import MySQLEmailConfigStore
 from src.infrastructure.model_config_store import MySQLModelConfigStore
 from src.infrastructure.postgres_vector_memory_store import PostgresVectorMemoryStore
+from src.modes.security_testing_mode.security_bug_service import SecurityBugService
+from src.modes.security_testing_mode.security_bug_store import PostgresSecurityBugStore
 from src.registry.agents import AgentRegistry
 from src.registry.mcp import MCPRegistry
 from src.registry.modes import ModeRegistry
@@ -169,6 +172,12 @@ async def lifespan(app: FastAPI):
     )
     await memory_runtime_service.initialize()
     tool_job_store = PostgresToolJobStore(settings=settings)
+    security_bug_store = PostgresSecurityBugStore(settings=settings)
+    security_bug_service = SecurityBugService(
+        security_bug_store,
+        reproduction_required=settings.security_bug_reproduction_required,
+    )
+    await security_bug_service.initialize()
     knowledge_graph_service = KnowledgeGraphService(settings=settings)
     tool_job_service = ToolJobService(
         store=tool_job_store,
@@ -213,6 +222,7 @@ async def lifespan(app: FastAPI):
         compatibility_runner_service=compatibility_runner_service,
         session_resource_service=session_resource_service,
         runtime_control=runtime_control,
+        security_bug_service=security_bug_service,
     )
     graph = build_agent_graph(
         agent_registry=agent_registry,
@@ -280,6 +290,8 @@ async def lifespan(app: FastAPI):
     app.state.task_pool_service = task_pool_service
     app.state.tool_job_store = tool_job_store
     app.state.tool_job_service = tool_job_service
+    app.state.security_bug_store = security_bug_store
+    app.state.security_bug_service = security_bug_service
     app.state.report_service = report_service
     app.state.tool_job_backend = settings.tool_job_backend
     app.state.knowledge_graph_service = knowledge_graph_service
@@ -378,6 +390,7 @@ app.include_router(integrations_router, prefix=settings.api_v1_prefix)
 app.include_router(reports_router, prefix=settings.api_v1_prefix)
 app.include_router(task_pool_router, prefix=settings.api_v1_prefix)
 app.include_router(sessions_router, prefix=settings.api_v1_prefix)
+app.include_router(security_bugs_router, prefix=settings.api_v1_prefix)
 app.include_router(settings_router, prefix=settings.api_v1_prefix)
 app.include_router(oauth_router, prefix=settings.api_v1_prefix)
 app.include_router(mail_router, prefix=settings.api_v1_prefix)

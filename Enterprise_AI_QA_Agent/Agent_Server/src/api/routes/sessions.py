@@ -30,6 +30,8 @@ _ARTIFACT_MEDIA_TYPES = {
     ".pdf": "application/pdf",
     ".txt": "text/plain",
     ".md": "text/markdown",
+    ".html": "text/html",
+    ".htm": "text/html",
 }
 
 
@@ -218,7 +220,12 @@ async def get_session_artifact_content(session_id: str, artifact_id: str, reques
     if artifact is None or artifact.session_id != session_id:
         raise HTTPException(status_code=404, detail="Artifact not found")
 
-    filename = str(artifact.label or Path(artifact.path).name or artifact.id)
+    filename = str(
+        artifact.metadata.get("filename")
+        or artifact.label
+        or Path(artifact.path).name
+        or artifact.id
+    )
     raw_path = str(artifact.path or "").strip()
     if raw_path.startswith("minio://"):
         try:

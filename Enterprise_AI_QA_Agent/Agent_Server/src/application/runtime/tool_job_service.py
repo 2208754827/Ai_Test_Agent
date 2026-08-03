@@ -132,14 +132,22 @@ class ToolJobService:
         summary: str,
         error_message: str,
         output_payload: dict[str, Any] | None = None,
+        artifacts: list[dict[str, Any]] | None = None,
     ) -> ToolJobRecord | None:
-        return await self._mark(
+        job = await self._mark(
             job_id,
             ToolJobStatus.failed,
             summary=summary,
             error_message=error_message,
             output_payload=output_payload or {},
         )
+        if job is None:
+            return None
+        saved_artifacts = await self._save_artifacts(job, artifacts or [])
+        job.artifact_count = len(saved_artifacts)
+        job.completed_at = datetime.utcnow()
+        job.updated_at = job.completed_at
+        return await self._store.save_job(job)
 
     async def cancel_job(self, job_id: str, reason: str | None = None) -> ToolJobRecord | None:
         return await self._mark(job_id, ToolJobStatus.cancelled, summary=reason or "Cancelled by operator.")

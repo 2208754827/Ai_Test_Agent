@@ -39,7 +39,13 @@ class SessionStore(Protocol):
         question_limit: int = 10,
         include_assistant: bool = False,
     ) -> list[dict]: ...
-    async def append_event(self, session_id: str, event: ExecutionEvent) -> None: ...
+    async def append_event(
+        self,
+        session_id: str,
+        event: ExecutionEvent,
+        *,
+        publish: bool = True,
+    ) -> None: ...
     async def list_events(
         self,
         session_id: str,
@@ -202,13 +208,20 @@ class InMemorySessionStore:
         items.sort(key=lambda item: item["created_at"], reverse=True)
         return items[: max(int(question_limit), 1)]
 
-    async def append_event(self, session_id: str, event: ExecutionEvent) -> None:
+    async def append_event(
+        self,
+        session_id: str,
+        event: ExecutionEvent,
+        *,
+        publish: bool = True,
+    ) -> None:
         session = self._sessions.get(session_id)
         if session is not None:
             session.event_count += 1
             session.updated_at = datetime.utcnow()
         self._events[session_id].append(event)
-        await self._queues[session_id].put(event)
+        if publish:
+            await self._queues[session_id].put(event)
 
     async def list_events(
         self,

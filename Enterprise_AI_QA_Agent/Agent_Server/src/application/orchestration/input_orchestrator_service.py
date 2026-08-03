@@ -267,10 +267,45 @@ class InputOrchestratorService:
             "hook_results": [result.model_dump(mode="python") for result in hook_results],
             "harness_flags": harness_flags,
         }
+        # An explicitly selected security-testing mode is an execution intent,
+        # even when the natural-language wording says "assessment" instead of
+        # "scan". Promote the safety effect only when the session carries a
+        # verified target grant and the dedicated runtime was explicitly
+        # enabled; ordinary conversations never receive this promotion.
+        if mode.key == "security_testing" and bool(
+            session.metadata.get("security_runtime_direct_execution", False)
+        ):
+            grant = session.metadata.get("security_authorization")
+            requested_target = str(
+                (context.get("security_testing_request") or {}).get("target_url")
+                or context.get("target_url")
+                or ""
+            ).strip()
+            if self._security_grant_matches_target(grant, requested_target):
+                safety_payload = dict(context.get("safety_assessment") or {})
+                effects = list(safety_payload.get("effect_levels") or [])
+                if "security_probe" not in effects:
+                    effects.append("security_probe")
+                safety_payload.update(
+                    {
+                        "effect_levels": effects,
+                        "authorization_status": "verified",
+                        "target_scope_status": "in_scope",
+                        "decision": "allow",
+                        "reason_codes": [
+                            *list(safety_payload.get("reason_codes") or []),
+                            "explicit_security_mode_verified_grant",
+                        ],
+                    }
+                )
+                context["safety_assessment"] = safety_payload
         trusted_resource_scope = session.metadata.get("resource_scope")
         if isinstance(trusted_resource_scope, dict):
             context["resource_scope"] = dict(trusted_resource_scope)
             context["trusted_resource_scope"] = dict(trusted_resource_scope)
+        trusted_security_authorization = session.metadata.get("security_authorization")
+        if isinstance(trusted_security_authorization, dict):
+            context["trusted_security_authorization"] = dict(trusted_security_authorization)
         if trusted_environment:
             context["trusted_environment"] = trusted_environment
         context["trusted_security_runtime_direct_execution"] = bool(
@@ -342,6 +377,27 @@ class InputOrchestratorService:
             orchestration_meta=orchestration_meta,
             context=context,
         )
+
+    def _security_grant_matches_target(self, grant: object, target_url: str) -> bool:
+        if not isinstance(grant, dict) or str(grant.get("status") or "").lower() != "verified":
+            return False
+        if not target_url:
+            return False
+        from urllib.parse import urlparse
+
+        parsed_target = urlparse(target_url)
+        target_host = (parsed_target.hostname or "").lower()
+        target_port = parsed_target.port
+        allowed_targets = [str(item).strip() for item in (grant.get("targets") or []) if str(item).strip()]
+        for allowed in allowed_targets:
+            parsed_allowed = urlparse(allowed)
+            allowed_host = (parsed_allowed.hostname or allowed.split(":", 1)[0]).strip("[]").lower()
+            allowed_port = parsed_allowed.port
+            if target_host and target_host == allowed_host and (
+                allowed_port is None or allowed_port == target_port
+            ):
+                return True
+        return False
 
     def _recognition_context(
         self,

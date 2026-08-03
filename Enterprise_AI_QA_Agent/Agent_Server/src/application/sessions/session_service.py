@@ -1091,11 +1091,16 @@ class SessionService:
         session_id = session.id
         model_response_summary = runtime_result.state.get("model_response_summary", {})
         response_mode = str(model_response_summary.get("mode") or "ok")
-        # Skip events that were already streamed in real-time during graph execution
+        # Graph events may already have been sent to SSE, but they still need to
+        # be persisted for audit/replay. Avoid a second queue publish for the
+        # streamed prefix instead of dropping those events from storage.
         streamed_count = runtime_result.state.get("_streamed_event_count", 0)
-        events_to_append = runtime_result.events[streamed_count:] if streamed_count > 0 else runtime_result.events
-        for event in events_to_append:
-            await self._store.append_event(session_id, event)
+        for index, event in enumerate(runtime_result.events):
+            await self._store.append_event(
+                session_id,
+                event,
+                publish=index >= streamed_count,
+            )
 
         for tool_message in runtime_result.tool_messages:
             session.messages.append(tool_message)

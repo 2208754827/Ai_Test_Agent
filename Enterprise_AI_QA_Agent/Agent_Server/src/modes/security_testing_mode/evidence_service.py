@@ -105,7 +105,12 @@ class SecurityEvidenceService:
         for task in campaign.tasks:
             if task.task_id in recorded_task_ids:
                 continue
-            if not task.started_at and not task.completed_at and not task.result_summary:
+            if (
+                task.status not in {"completed", "failed", "skipped"}
+                and not task.started_at
+                and not task.completed_at
+                and not task.result_summary
+            ):
                 continue
             campaign.execution_records.append(
                 ToolExecutionRecord(
@@ -121,6 +126,39 @@ class SecurityEvidenceService:
                     artifacts=list(task.artifacts),
                 )
             )
+            # Subagent execution persists task output before the parent can
+            # build the report. Materialize the same output as evidence so a
+            # finding can be traced even when no local runner result object is
+            # available on the parent path.
+            if task.raw_output:
+                evidence_id = f"ev_{task.task_id}_raw_output"
+                if not any(item.artifact_id == evidence_id for item in campaign.evidence):
+                    campaign.evidence.append(
+                        EvidenceArtifact(
+                            artifact_id=evidence_id,
+                            artifact_type="tool_output",
+                            filename=f"{task.task_id}_raw_output.txt",
+                            content_type="text/plain",
+                            content=_truncate(task.raw_output, 6000),
+                            size_bytes=len(task.raw_output.encode("utf-8", errors="ignore")),
+                            source_task_id=task.task_id,
+                            created_at=_utc_now(),
+                        )
+                    )
+            for index, artifact in enumerate(task.artifacts, start=1):
+                artifact_id = f"ev_{task.task_id}_artifact_{index}"
+                if any(item.artifact_id == artifact_id for item in campaign.evidence):
+                    continue
+                campaign.evidence.append(
+                    EvidenceArtifact(
+                        artifact_id=artifact_id,
+                        artifact_type="output",
+                        filename=Path(str(artifact)).name or f"artifact_{index}.txt",
+                        content=str(artifact),
+                        source_task_id=task.task_id,
+                        created_at=_utc_now(),
+                    )
+                )
 
 
 def _utc_now() -> str:

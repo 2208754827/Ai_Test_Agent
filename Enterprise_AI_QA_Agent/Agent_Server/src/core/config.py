@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     postgres_tool_job_table: str = "agent_tool_jobs"
     postgres_tool_artifact_table: str = "agent_tool_artifacts"
     postgres_session_resource_table: str = "agent_session_resources"
+    postgres_security_bug_table: str = "agent_security_bugs"
     postgres_mcp_server_table: str = "agent_mcp_servers"
     postgres_vector_dimension: int = 1536
     memgraph_host: str = "127.0.0.1"
@@ -102,6 +103,31 @@ class Settings(BaseSettings):
     # Worker tool output above this byte threshold is compacted with a
     # structure-preserving summary instead of a blind head truncation (S4).
     security_runner_output_summary_threshold_bytes: int = 16384
+    # P0 attack-chain loop. Attempts remain bound to registered profiles,
+    # the verified target scope, per-task timeout, and the existing approval gate.
+    security_attack_chain_enabled: bool = True
+    security_campaign_max_loops: int = 5
+    security_campaign_max_attempts: int = 30
+    security_bug_registry_enabled: bool = True
+    security_bug_reproduction_required: bool = True
+    security_attack_session_enabled: bool = False
+    security_attack_session_timeout_seconds: int = 900
+    security_attack_session_command_timeout_seconds: int = 120
+    # P3 callback and graph capabilities stay opt-in. The callback broker
+    # binds loopback only and never turns a callback into an executable shell.
+    security_callback_broker_enabled: bool = False
+    security_callback_port_range: str = "28000-28100"
+    security_callback_lease_timeout_seconds: int = 300
+    security_graph_memory_enabled: bool = False
+    # P4 is deliberately separate from the legacy runner wrapper. Empty
+    # allowlists deny every installation attempt, even when the feature flag
+    # is enabled.
+    security_tool_bootstrap_enabled: bool = False
+    security_tool_bootstrap_package_allowlist: str = ""
+    security_tool_bootstrap_image_allowlist: str = ""
+    security_tool_bootstrap_repository_allowlist: str = ""
+    security_tool_bootstrap_timeout_seconds: int = 300
+    security_tool_bootstrap_cleanup_required: bool = True
     # Performance runner
     performance_runner_backend: str = "auto"
     performance_runner_ephemeral: bool = True

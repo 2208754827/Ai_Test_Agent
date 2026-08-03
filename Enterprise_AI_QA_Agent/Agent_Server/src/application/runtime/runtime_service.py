@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 import json
+import re
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from src.application.models.model_runtime_service import ModelRuntimeService
@@ -106,7 +108,10 @@ class RuntimeService:
             context_keys=",".join(sorted(request.context.keys())) or "none",
             user_message_preview=truncate_text(request.user_message, 160),
         )
-        if self._should_use_dedicated_security_runtime(request):
+        if (
+            self._security_tool_bootstrap_requested(request)
+            or self._should_use_dedicated_security_runtime(request)
+        ):
             return await self._execute_security_mode_turn(session, request, initial_state)
         return await self._execute_state(session, initial_state, on_model_chunk=on_model_chunk)
 
@@ -146,9 +151,14 @@ class RuntimeService:
 
         tool = self._tool_registry.get(approval["tool_key"])
         stored_scope_hash = str(approval.get("metadata", {}).get("approval_scope_hash") or "")
+        approval_mode_key = str(
+            approval.get("metadata", {}).get("approval_mode_key")
+            or state.get("mode_key")
+            or "default"
+        )
         scope_matches = bool(stored_scope_hash) and ApprovalScopeService().matches(
             stored_scope_hash,
-            mode_key=str(state.get("mode_key") or "default"),
+            mode_key=approval_mode_key,
             tool_key=tool.key,
             arguments=tool_call.arguments,
             context=state.get("context_bundle") or {},
@@ -165,6 +175,8 @@ class RuntimeService:
                 **tool_call.arguments,
                 "_server_approval_granted": True,
             }
+            if tool.key == "security-tool-bootstrap":
+                tool_call.arguments["_p4_approval_scope_hash"] = stored_scope_hash
             append_graph_event(
                 state,
                 "tool.execution_started",
@@ -253,6 +265,127 @@ class RuntimeService:
                 state=state,
                 tool_messages=self._to_chat_messages(turn_id, [execution_record.model_dump(mode="python")]),
                 pending_turn=pending_turn,
+            )
+
+        if tool.key == "security-tool-bootstrap":
+            output = execution_record.output if isinstance(execution_record.output, dict) else {}
+            manifest = output.get("tool_bootstrap") if isinstance(output.get("tool_bootstrap"), dict) else {}
+            bootstrap_status = str(manifest.get("status") or execution_record.status).strip()
+            final_response = str(
+                output.get("summary")
+                or execution_record.summary
+                or f"P4 tool bootstrap {bootstrap_status}."
+            ).strip()
+            campaign_state = None
+            campaign_id = str(
+                manifest.get("campaign_id")
+                or tool_call.arguments.get("campaign_id")
+                or ""
+            ).strip()
+            target_allowlist = [
+                str(item).strip()
+                for item in (tool_call.arguments.get("target_allowlist") or [])
+                if str(item).strip()
+            ]
+            projected_report_markdown = str(output.get("report_markdown") or "").strip()
+            if projected_report_markdown:
+                state["context_bundle"] = context.context_bundle
+                final_response = projected_report_markdown
+            elif campaign_id and manifest:
+                try:
+                    campaign_state = self._tool_runtime_service.record_security_tool_bootstrap_campaign(
+                        campaign_id=campaign_id,
+                        target_allowlist=target_allowlist,
+                        manifest=manifest,
+                        tool_summary=final_response,
+                        tool_status=execution_record.status,
+                        context=context,
+                    )
+                except Exception as exc:
+                    logger.exception(
+                        "security_tool_bootstrap_campaign_projection_failed %s",
+                        json.dumps(
+                            {
+                                "session_id": session.id,
+                                "campaign_id": campaign_id,
+                                "bootstrap_id": str(manifest.get("bootstrap_id") or ""),
+                                "error": str(exc),
+                            },
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                        ),
+                    )
+                    final_response = (
+                        f"{final_response}\n\n"
+                        "P4 执行结果已保留，但 Campaign 审计投影失败；"
+                        "本次结果不能作为完整安全 Campaign 结算。"
+                    )
+                    state["termination_reason"] = "failed"
+                else:
+                    state["context_bundle"] = context.context_bundle
+                    if campaign_state.report_markdown:
+                        final_response = campaign_state.report_markdown
+            state["runtime_messages"] = [approved_tool_message]
+            state["final_response"] = final_response
+            state["control_state"] = "completed"
+            state["continue_loop"] = False
+            projected_settlement = output.get("settlement")
+            projected_settlement_status = str(
+                projected_settlement.get("status")
+                if isinstance(projected_settlement, dict)
+                else ""
+            ).strip().lower()
+            campaign_settlement_status = (
+                campaign_state.campaign.settlement.status
+                if campaign_state is not None
+                and campaign_state.campaign is not None
+                and campaign_state.campaign.settlement is not None
+                else projected_settlement_status
+            )
+            # The previous state necessarily ended at waiting_approval. Once
+            # P4 has resumed, settlement is the authoritative terminal state:
+            # a partial report is completed work with an environment limit,
+            # not an approval still awaiting action.
+            state["termination_reason"] = (
+                "failed"
+                if campaign_settlement_status == "failed"
+                or (not campaign_settlement_status and execution_record.status == "failed")
+                else ""
+            )
+            append_graph_event(
+                state,
+                "security.tool_bootstrap.completed"
+                if execution_record.status == "completed"
+                else "security.tool_bootstrap.failed",
+                "approval_resume",
+                final_response,
+                tool_key=tool.key,
+                approval_id=approval["id"],
+                bootstrap_id=str(manifest.get("bootstrap_id") or ""),
+                bootstrap_status=bootstrap_status,
+                manifest_path=str(manifest.get("manifest_path") or ""),
+                cleanup_complete=bool(manifest.get("cleanup_complete")),
+                campaign_id=campaign_id,
+                campaign_projection_status=(
+                    campaign_state.campaign.settlement.status
+                    if campaign_state is not None
+                    and campaign_state.campaign is not None
+                    and campaign_state.campaign.settlement is not None
+                    else "not_projected"
+                ),
+            )
+            snapshot = self._build_snapshot(session, state, session.snapshot_count + 1)
+            return RuntimeTurnResult(
+                output_text=final_response,
+                events=self._events_from_log(session.id, state["event_log"]),
+                snapshot=snapshot,
+                approvals=[],
+                state=state,
+                tool_messages=self._to_chat_messages(
+                    turn_id,
+                    [execution_record.model_dump(mode="python")],
+                ),
+                pending_turn={},
             )
 
         conversation_messages = list(pending_turn.get("conversation_messages", []))
@@ -442,12 +575,60 @@ class RuntimeService:
 
     def _should_use_dedicated_security_runtime(self, request: ExecutionRequest) -> bool:
         safety = request.context.get("safety_assessment")
+        authorization_verified = isinstance(safety, dict) and safety.get("authorization_status") == "verified"
+        if not authorization_verified:
+            authorization_verified = self._trusted_security_grant_matches_request(request)
         return (
             str(request.mode_key or "").strip() == "security_testing"
             and bool(request.context.get("trusted_security_runtime_direct_execution"))
-            and isinstance(safety, dict)
-            and safety.get("authorization_status") == "verified"
+            and authorization_verified
         )
+
+    @staticmethod
+    def _security_tool_bootstrap_requested(request: ExecutionRequest) -> bool:
+        explicit = request.context.get("security_tool_bootstrap_request")
+        return (
+            str(request.mode_key or "").strip() == "security_testing"
+            and isinstance(explicit, dict)
+            and bool(explicit.get("requested"))
+        )
+
+    def _trusted_security_grant_matches_request(self, request: ExecutionRequest) -> bool:
+        grant = request.context.get("trusted_security_authorization")
+        if not isinstance(grant, dict) or str(grant.get("status") or "").lower() != "verified":
+            return False
+        expires_at = str(grant.get("expires_at") or "").strip()
+        if expires_at:
+            try:
+                expiry = datetime.fromisoformat(expires_at.replace("Z", "+00:00"))
+                if expiry.tzinfo is None:
+                    return False
+                if expiry <= datetime.now(expiry.tzinfo):
+                    return False
+            except ValueError:
+                return False
+        security_request = request.context.get("security_testing_request")
+        target_url = str(
+            (security_request.get("target_url") if isinstance(security_request, dict) else "")
+            or request.context.get("target_url")
+            or ""
+        ).strip()
+        if not target_url:
+            match = re.search(r"https?://[^\s,;]+", request.user_message or "", flags=re.IGNORECASE)
+            target_url = match.group(0).rstrip(".,;)") if match else ""
+        parsed_target = urlparse(target_url)
+        target_host = (parsed_target.hostname or "").lower()
+        target_port = parsed_target.port
+        if not target_host:
+            return False
+        for allowed in grant.get("targets") or []:
+            allowed_text = str(allowed).strip()
+            parsed_allowed = urlparse(allowed_text)
+            allowed_host = (parsed_allowed.hostname or allowed_text.split(":", 1)[0]).strip("[]").lower()
+            allowed_port = parsed_allowed.port
+            if target_host == allowed_host and (allowed_port is None or allowed_port == target_port):
+                return True
+        return False
 
     async def _execute_security_mode_turn(
         self,
@@ -455,6 +636,21 @@ class RuntimeService:
         request: ExecutionRequest,
         state: dict[str, Any],
     ) -> RuntimeTurnResult:
+        bootstrap_arguments, bootstrap_error = self._build_security_bootstrap_runtime_arguments(request)
+        if bootstrap_arguments is not None:
+            return self._build_security_bootstrap_waiting_approval(
+                session=session,
+                request=request,
+                state=state,
+                arguments=bootstrap_arguments,
+            )
+        if bootstrap_error:
+            return self._build_security_bootstrap_denied(
+                session=session,
+                state=state,
+                error=bootstrap_error,
+            )
+
         tool = self._tool_registry.get("security-scan-runner")
         call = ModelToolCall(
             id=f"security_runtime_{request.turn_id}",
@@ -555,6 +751,184 @@ class RuntimeService:
             if value is not None and value != "" and key not in arguments:
                 arguments[key] = value
         return arguments
+
+    def _build_security_bootstrap_runtime_arguments(
+        self,
+        request: ExecutionRequest,
+    ) -> tuple[dict[str, Any] | None, str]:
+        explicit = request.context.get("security_tool_bootstrap_request")
+        if not isinstance(explicit, dict):
+            return None, ""
+        if not bool(explicit.get("requested")):
+            return None, ""
+        target = str(
+            explicit.get("target")
+            or explicit.get("target_url")
+            or (request.context.get("security_testing_request") or {}).get("target_url")
+            or request.context.get("target_url")
+            or ""
+        ).strip()
+        trusted = request.context.get("trusted_security_authorization")
+        allowed_targets = []
+        if isinstance(trusted, dict):
+            allowed_targets = [str(item).strip() for item in (trusted.get("targets") or []) if str(item).strip()]
+        if not target or not allowed_targets or not self._target_matches_any_allowed(target, allowed_targets):
+            return None, "target_out_of_scope"
+        campaign_id = str(
+            explicit.get("campaign_id")
+            or request.context.get("campaign_id")
+            or f"bootstrap-{request.turn_id}"
+        ).strip()
+        prepared, error = self._tool_runtime_service.prepare_security_tool_bootstrap_arguments(
+            campaign_id=campaign_id,
+            target_allowlist=allowed_targets,
+            profile_key=str(explicit.get("profile_key") or "").strip(),
+            tool_name=str(explicit.get("tool_name") or "").strip(),
+            requested_version=str(explicit.get("requested_version") or "").strip(),
+            timeout_seconds=explicit.get("timeout_seconds"),
+        )
+        return prepared, error
+
+    def _build_security_bootstrap_waiting_approval(
+        self,
+        *,
+        session: SessionRecord,
+        request: ExecutionRequest,
+        state: dict[str, Any],
+        arguments: dict[str, Any],
+    ) -> RuntimeTurnResult:
+        tool = self._tool_registry.get("security-tool-bootstrap")
+        approval_mode_key = "security_tool_bootstrap"
+        scope_hash = ApprovalScopeService().build_hash(
+            mode_key=approval_mode_key,
+            tool_key=tool.key,
+            arguments=arguments,
+            context=state.get("context_bundle") or {},
+        )
+        approval_id = str(uuid4())
+        reason = (
+            "P4 temporary security-tool readiness requires a dedicated approval for "
+            "the exact campaign, targets, package, image, repository and timeout."
+        )
+        approval = {
+            "id": approval_id,
+            "session_id": session.id,
+            "tool_key": tool.key,
+            "tool_name": tool.name,
+            "reason": reason,
+            "status": "pending",
+            "created_at": datetime.now(timezone.utc),
+            "metadata": {
+                "turn_id": state["turn_id"],
+                "call_id": f"security_bootstrap_{state['turn_id']}",
+                "arguments": arguments,
+                "approval_scope_hash": scope_hash,
+                "approval_mode_key": approval_mode_key,
+                "approval_kind": "security_tool_bootstrap",
+                "permission_behavior": "ask",
+                "permission_source": "security_p4_runtime",
+                "permission_reason_code": "security_tool_bootstrap_approval_required",
+            },
+        }
+        record = ToolExecutionRecord(
+            call_id=approval["metadata"]["call_id"],
+            tool_key=tool.key,
+            tool_name=tool.name,
+            status="waiting_approval",
+            summary=reason,
+            input=arguments,
+            output={"error": "approval_required", "approval_kind": "security_tool_bootstrap"},
+            approval_id=approval_id,
+        )
+        state["tool_results"] = [record.model_dump(mode="python")]
+        state["tool_messages"] = []
+        state["pending_approvals"] = [approval]
+        state["pending_turn"] = self._build_pending_turn(state, stage="waiting_approval")
+        state["control_state"] = "waiting_approval"
+        state["termination_reason"] = "waiting_approval"
+        state["final_response"] = reason
+        append_graph_event(
+            state,
+            "security.tool_bootstrap.approval_required",
+            "runtime",
+            reason,
+            tool_key=tool.key,
+            approval_id=approval_id,
+            approval_scope_hash=scope_hash,
+            campaign_id=arguments.get("campaign_id", ""),
+            profile_key=arguments.get("profile_key", ""),
+            tool_name=arguments.get("tool_name", ""),
+        )
+        snapshot = self._build_snapshot(session, state, session.snapshot_count + 1)
+        return RuntimeTurnResult(
+            output_text=reason,
+            events=self._events_from_log(session.id, state["event_log"]),
+            snapshot=snapshot,
+            approvals=[approval],
+            state=state,
+            tool_messages=[],
+            pending_turn=state["pending_turn"],
+        )
+
+    def _build_security_bootstrap_denied(
+        self,
+        *,
+        session: SessionRecord,
+        state: dict[str, Any],
+        error: str,
+    ) -> RuntimeTurnResult:
+        messages = {
+            "bootstrap_disabled": "P4 temporary tool bootstrap is disabled by server configuration.",
+            "package_not_allowlisted": "The requested P4 tool/package/profile is not allowlisted.",
+            "target_out_of_scope": "P4 temporary tool bootstrap target is outside the verified authorization scope.",
+        }
+        summary = messages.get(error, error)
+        record = ToolExecutionRecord(
+            call_id=f"security_bootstrap_{state['turn_id']}",
+            tool_key="security-tool-bootstrap",
+            tool_name="Security Tool Bootstrap",
+            status="denied",
+            summary=summary,
+            input={},
+            output={"error": error},
+        )
+        state["tool_results"] = [record.model_dump(mode="python")]
+        state["tool_messages"] = [self._build_tool_message(record)]
+        state["pending_approvals"] = []
+        state["pending_turn"] = {}
+        state["control_state"] = "completed"
+        state["termination_reason"] = ""
+        state["final_response"] = summary
+        append_graph_event(
+            state,
+            "security.tool_bootstrap.denied",
+            "runtime",
+            summary,
+            error=error,
+        )
+        snapshot = self._build_snapshot(session, state, session.snapshot_count + 1)
+        return RuntimeTurnResult(
+            output_text=summary,
+            events=self._events_from_log(session.id, state["event_log"]),
+            snapshot=snapshot,
+            approvals=[],
+            state=state,
+            tool_messages=self._to_chat_messages(str(state["turn_id"]), state["tool_results"]),
+            pending_turn={},
+        )
+
+    @staticmethod
+    def _target_matches_any_allowed(target: str, allowed_targets: list[str]) -> bool:
+        parsed_target = urlparse(target)
+        target_host = (parsed_target.hostname or target.split(":", 1)[0]).strip("[]").lower()
+        target_port = parsed_target.port
+        for allowed in allowed_targets:
+            parsed_allowed = urlparse(allowed)
+            allowed_host = (parsed_allowed.hostname or allowed.split(":", 1)[0]).strip("[]").lower()
+            allowed_port = parsed_allowed.port
+            if target_host == allowed_host and (allowed_port is None or allowed_port == target_port):
+                return True
+        return False
 
     def _effective_model_config(self, requested_model_key: str = "") -> ModelConfigRecord | None:
         if requested_model_key:

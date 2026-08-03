@@ -228,6 +228,46 @@ class SecurityExecutionEnvironmentService:
         if error:
             raise RuntimeError(error)
 
+    async def create_persistent_container(
+        self,
+        *,
+        campaign_id: str,
+        artifact_dir: Path,
+    ) -> str:
+        """Create or reuse the dedicated Docker container for one campaign."""
+        return await asyncio.to_thread(
+            self._create_persistent_container,
+            campaign_id,
+            artifact_dir,
+        )
+
+    async def execute_in_container(
+        self,
+        *,
+        container_name: str,
+        command: str,
+        command_args: list[str],
+        timeout_seconds: float,
+        artifact_dir: Path,
+        context: Any = None,
+    ) -> SecurityCommandExecutionResult:
+        """Execute one validated command in an existing campaign container."""
+        self._enforce_target_allowlist(command_args)
+        command, command_args = self._rewrite_localhost_for_docker(command, command_args)
+        return await asyncio.to_thread(
+            self._run_in_existing_container,
+            container_name,
+            command,
+            command_args,
+            timeout_seconds,
+            artifact_dir,
+            context,
+        )
+
+    async def container_heartbeat(self, container_name: str) -> bool:
+        """Return whether a campaign container is still running."""
+        return await asyncio.to_thread(self._container_is_running, container_name)
+
     def _enforce_target_allowlist(self, command_args: list[str]) -> None:
         """Reject commands targeting hosts outside the allowlist (S6).
 
@@ -419,6 +459,201 @@ class SecurityExecutionEnvironmentService:
             container_name=container_name,
             output_artifacts=self._collect_output_artifacts(host_workdir),
         )
+
+    def _create_persistent_container(self, campaign_id: str, artifact_dir: Path) -> str:
+        docker = shutil.which("docker")
+        if docker is None:
+            raise FileNotFoundError("Docker CLI is not installed or not on PATH.")
+        normalized_campaign_id = str(campaign_id or "").strip()
+        if not normalized_campaign_id:
+            raise ValueError("Persistent security container requires campaign_id.")
+        image = self._get_str(
+            "security_runner_docker_image",
+            "SECURITY_RUNNER_DOCKER_IMAGE",
+            "vxcontrol/kali-linux",
+        )
+        workdir = self._get_str(
+            "security_runner_docker_workdir",
+            "SECURITY_RUNNER_DOCKER_WORKDIR",
+            "/work",
+        )
+        prefix = self._get_str(
+            "security_runner_docker_container_prefix",
+            "SECURITY_RUNNER_DOCKER_CONTAINER_PREFIX",
+            "qa-security-runner",
+        )
+        container_name = f"{_slug(prefix)}-attack-{_slug(normalized_campaign_id)}"[:120].strip("-")
+        host_workdir = artifact_dir / "_security_attack_session_work"
+        host_workdir.mkdir(parents=True, exist_ok=True)
+        self._ensure_persistent_container(
+            docker=docker,
+            image=image,
+            container_name=container_name,
+            host_workdir=host_workdir,
+            container_workdir=workdir,
+        )
+        logger.info(
+            "security_attack_container_ready campaign_id=%s container=%s",
+            normalized_campaign_id,
+            container_name,
+        )
+        return container_name
+
+    def _run_in_existing_container(
+        self,
+        container_name: str,
+        command: str,
+        command_args: list[str],
+        timeout_seconds: float,
+        artifact_dir: Path,
+        context: Any,
+    ) -> SecurityCommandExecutionResult:
+        docker = shutil.which("docker")
+        if docker is None:
+            raise FileNotFoundError("Docker CLI is not installed or not on PATH.")
+        normalized_name = str(container_name or "").strip()
+        if not normalized_name:
+            raise ValueError("Persistent security container_name is required.")
+        if not command_args:
+            raise ValueError("Security command rendered an empty argv.")
+        if not self._container_is_running(normalized_name):
+            raise RuntimeError(f"Security runner container is not running: {normalized_name}")
+        workdir = self._get_str(
+            "security_runner_docker_workdir",
+            "SECURITY_RUNNER_DOCKER_WORKDIR",
+            "/work",
+        )
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        started_at = _utc_now()
+        shell_command = self._wrap_with_shell_timeout(command, timeout_seconds)
+        docker_args = [
+            docker,
+            "exec",
+            "-w",
+            workdir,
+            normalized_name,
+            "sh",
+            "-lc",
+            shell_command,
+        ]
+        logger.info(
+            "security_attack_session_exec_start container=%s timeout_seconds=%s session_id=%s turn_id=%s",
+            normalized_name,
+            timeout_seconds,
+            getattr(context, "session_id", "") or "",
+            getattr(context, "turn_id", "") or "",
+        )
+        try:
+            completed = subprocess.run(
+                docker_args,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds + 5,
+            )
+            stdout_text = completed.stdout or ""
+            stderr_text = completed.stderr or ""
+            exit_code = completed.returncode
+            timed_out = exit_code == 124
+        except subprocess.TimeoutExpired as exc:
+            stdout_text = exc.stdout or ""
+            stderr_text = exc.stderr or ""
+            exit_code = -1
+            timed_out = True
+        result = SecurityCommandExecutionResult(
+            backend="docker",
+            command=command,
+            argv=docker_args,
+            cwd=workdir,
+            stdout=stdout_text,
+            stderr=stderr_text,
+            exit_code=exit_code,
+            timed_out=timed_out,
+            started_at=started_at,
+            completed_at=_utc_now(),
+            container_name=normalized_name,
+            output_artifacts=self._collect_output_artifacts(
+                artifact_dir / "_security_attack_session_work"
+            ),
+        )
+        logger.info(
+            "security_attack_session_exec_complete container=%s exit_code=%s timed_out=%s stdout_bytes=%s stderr_bytes=%s",
+            normalized_name,
+            exit_code,
+            timed_out,
+            len(stdout_text.encode("utf-8", errors="replace")),
+            len(stderr_text.encode("utf-8", errors="replace")),
+        )
+        return result
+
+    def _container_is_running(self, container_name: str) -> bool:
+        docker = shutil.which("docker")
+        if docker is None:
+            return False
+        inspect = subprocess.run(
+            [docker, "inspect", "-f", "{{.State.Running}}", str(container_name)],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+        return inspect.returncode == 0 and (inspect.stdout or "").strip().lower() == "true"
+
+    def _ensure_persistent_container(
+        self,
+        *,
+        docker: str,
+        image: str,
+        container_name: str,
+        host_workdir: Path,
+        container_workdir: str,
+    ) -> None:
+        if self._container_is_running(container_name):
+            return
+        inspect = subprocess.run(
+            [docker, "inspect", container_name],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+        if inspect.returncode == 0:
+            remove_error = self._remove_container(docker=docker, container_name=container_name)
+            if remove_error:
+                raise RuntimeError(remove_error)
+        self._pull_image_if_needed(docker, image)
+        run_args = [
+            docker,
+            "run",
+            "-d",
+            "--name",
+            container_name,
+            "--workdir",
+            container_workdir,
+        ]
+        if self._get_bool("security_runner_docker_net_raw", "SECURITY_RUNNER_DOCKER_NET_RAW", True):
+            run_args.extend(["--cap-add", "NET_RAW"])
+        if self._get_bool("security_runner_docker_net_admin", "SECURITY_RUNNER_DOCKER_NET_ADMIN", False):
+            run_args.extend(["--cap-add", "NET_ADMIN"])
+        network = self._get_str("security_runner_docker_network", "SECURITY_RUNNER_DOCKER_NETWORK", "")
+        if network:
+            run_args.extend(["--network", network])
+        run_args.extend(
+            ["-v", f"{host_workdir.resolve()}:{container_workdir}", image, "tail", "-f", "/dev/null"]
+        )
+        run = subprocess.run(
+            run_args,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=60,
+        )
+        if run.returncode != 0:
+            raise RuntimeError(run.stderr.strip() or run.stdout.strip() or "Failed to create security Docker container.")
 
     def _start_detached_in_docker(
         self,
