@@ -494,6 +494,13 @@ class FindingRecord(BaseModel):
     verified: bool = False
     verification_level: str = "observed"  # observed / confirmed / exploitable / impact_verified
     evidence_ids: list[str] = Field(default_factory=list)
+    # Impact proof is explicit structured evidence, not an inference from a
+    # vulnerability title. Values are redacted/normalized before persistence.
+    exposed_data_types: list[str] = Field(default_factory=list)
+    exposed_record_estimate: int | None = None
+    confidentiality_impact: str = "none"
+    integrity_impact: str = "none"
+    availability_impact: str = "none"
     false_positive: bool = False
     # When True, the severity is trusted as-is and SeverityEvaluator skips
     # the impact/exploitability promotion math. Use for trivially-verifiable

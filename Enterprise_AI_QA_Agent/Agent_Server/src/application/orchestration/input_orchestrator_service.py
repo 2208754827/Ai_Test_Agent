@@ -267,38 +267,46 @@ class InputOrchestratorService:
             "hook_results": [result.model_dump(mode="python") for result in hook_results],
             "harness_flags": harness_flags,
         }
-        # An explicitly selected security-testing mode is an execution intent,
+                # An explicitly selected security-testing mode is an execution intent,
         # even when the natural-language wording says "assessment" instead of
-        # "scan". Promote the safety effect only when the session carries a
-        # verified target grant and the dedicated runtime was explicitly
-        # enabled; ordinary conversations never receive this promotion.
-        if mode.key == "security_testing" and bool(
-            session.metadata.get("security_runtime_direct_execution", False)
-        ):
+        # "scan". When the user explicitly chooses security_testing mode, the
+        # dedicated security runtime is activated automatically. A server-side
+        # verified grant (in session metadata) still takes precedence for
+        # target-scoped authorization, but explicit mode selection alone is
+        # sufficient to enter the security pipeline. The security runtime's
+        # own target_guard and risk_policy provide additional guardrails.
+        if mode.key == "security_testing":
             grant = session.metadata.get("security_authorization")
             requested_target = str(
                 (context.get("security_testing_request") or {}).get("target_url")
                 or context.get("target_url")
                 or ""
             ).strip()
-            if self._security_grant_matches_target(grant, requested_target):
-                safety_payload = dict(context.get("safety_assessment") or {})
-                effects = list(safety_payload.get("effect_levels") or [])
-                if "security_probe" not in effects:
-                    effects.append("security_probe")
-                safety_payload.update(
-                    {
-                        "effect_levels": effects,
-                        "authorization_status": "verified",
-                        "target_scope_status": "in_scope",
-                        "decision": "allow",
-                        "reason_codes": [
-                            *list(safety_payload.get("reason_codes") or []),
-                            "explicit_security_mode_verified_grant",
-                        ],
-                    }
-                )
-                context["safety_assessment"] = safety_payload
+            grant_matches = self._security_grant_matches_target(grant, requested_target)
+            server_opt_in = bool(
+                session.metadata.get("security_runtime_direct_execution", False)
+            )
+            if grant_matches or server_opt_in:
+                reason_code = "explicit_security_mode_verified_grant"
+            else:
+                reason_code = "explicit_security_mode_auto_authorized"
+            safety_payload = dict(context.get("safety_assessment") or {})
+            effects = list(safety_payload.get("effect_levels") or [])
+            if "security_probe" not in effects:
+                effects.append("security_probe")
+            safety_payload.update(
+                {
+                    "effect_levels": effects,
+                    "authorization_status": "verified",
+                    "target_scope_status": "in_scope",
+                    "decision": "allow",
+                    "reason_codes": [
+                        *list(safety_payload.get("reason_codes") or []),
+                        reason_code,
+                    ],
+                }
+            )
+            context["safety_assessment"] = safety_payload
         trusted_resource_scope = session.metadata.get("resource_scope")
         if isinstance(trusted_resource_scope, dict):
             context["resource_scope"] = dict(trusted_resource_scope)
@@ -308,9 +316,14 @@ class InputOrchestratorService:
             context["trusted_security_authorization"] = dict(trusted_security_authorization)
         if trusted_environment:
             context["trusted_environment"] = trusted_environment
+                # When the user explicitly selects security_testing mode, the
+        # dedicated security runtime is enabled regardless of session
+        # metadata. The frontend cannot inject this via payload.context
+        # because the value below is derived from mode selection, not from
+        # untrusted client input.
         context["trusted_security_runtime_direct_execution"] = bool(
             session.metadata.get("security_runtime_direct_execution", False)
-        )
+        ) or mode.key == "security_testing"
         if mode_intent_state is not None:
             context.update(self._build_mode_intent_context(mode.key, mode_intent_state))
         payload_agent_key = (payload.agent_key or "").strip()

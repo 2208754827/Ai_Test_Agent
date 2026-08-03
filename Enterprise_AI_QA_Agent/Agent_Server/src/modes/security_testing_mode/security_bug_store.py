@@ -329,6 +329,20 @@ def merge_security_bug_records(
     merged.reproduction_steps = _unique([*merged.reproduction_steps, *candidate.reproduction_steps])
     merged.evidence_ids = _unique([*merged.evidence_ids, *candidate.evidence_ids])
     merged.exposed_data_types = _unique([*merged.exposed_data_types, *candidate.exposed_data_types])
+    if candidate.exposed_record_estimate is not None:
+        merged.exposed_record_estimate = max(
+            merged.exposed_record_estimate or 0,
+            candidate.exposed_record_estimate,
+        )
+    for field_name in (
+        "confidentiality_impact",
+        "integrity_impact",
+        "availability_impact",
+    ):
+        current_impact = getattr(merged, field_name)
+        candidate_impact = getattr(candidate, field_name)
+        if _IMPACT_ORDER.get(candidate_impact, 0) > _IMPACT_ORDER.get(current_impact, 0):
+            setattr(merged, field_name, candidate_impact)
     merged.campaign_ids = _unique([*merged.campaign_ids, *candidate.campaign_ids])
     merged.finding_ids = _unique([*merged.finding_ids, *candidate.finding_ids])
     merged.attempt_ids = _unique([*merged.attempt_ids, *candidate.attempt_ids])
@@ -355,6 +369,9 @@ def merge_security_bug_records(
 def _stronger_verification_level(current: str, candidate: str) -> str:
     order = {"observed": 0, "confirmed": 1, "exploitable": 2, "impact_verified": 3}
     return candidate if order.get(candidate, 0) > order.get(current, 0) else current
+
+
+_IMPACT_ORDER = {"none": 0, "low": 1, "medium": 2, "high": 3}
 
 
 def _unique(values: list[str]) -> list[str]:

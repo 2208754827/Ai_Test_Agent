@@ -10,6 +10,9 @@ from src.modes.security_testing_mode.campaign_state import SecurityBugRecord
 from src.modes.security_testing_mode.security_bug_reproduction_package import (
     SecurityBugReproductionPackageService,
 )
+from src.modes.security_testing_mode.security_bug_retest_executor import (
+    SecurityBugRetestExecutor,
+)
 from src.schemas.security_bug import SecurityBugTransitionRequest
 
 
@@ -70,6 +73,22 @@ async def download_security_bug_reproduction_package(
         media_type="application/json",
         headers={"Content-Disposition": _attachment_header(filename)},
     )
+
+
+@router.post("/{bug_id}/retest")
+async def retest_security_bug(bug_id: str, request: Request):
+    executor = SecurityBugRetestExecutor(
+        request.app.state.security_bug_service,
+        settings=getattr(request.app.state, "settings", None),
+    )
+    try:
+        return await executor.retest(bug_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Security Bug not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @router.patch("/{bug_id}", response_model=SecurityBugRecord)

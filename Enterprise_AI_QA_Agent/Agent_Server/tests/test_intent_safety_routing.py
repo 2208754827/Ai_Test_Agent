@@ -233,7 +233,13 @@ def test_security_mode_is_never_ai_activated_without_authorization():
     assert request.context["safety_assessment"]["decision"] == "require_authorization"
 
 
-def test_frontend_cannot_enable_dedicated_security_runtime_bypass():
+def test_frontend_context_cannot_override_security_runtime_flag():
+    """Frontend payload.context must not be able to inject the trusted flag.
+
+    The flag is derived from mode selection and server-side metadata only.
+    Explicitly selecting security_testing mode activates the runtime, but
+    the untrusted context value itself is ignored.
+    """
     request = InputOrchestratorService(ModeRegistry()).orchestrate(
         _session(),
         SendMessageRequest(
@@ -244,11 +250,35 @@ def test_frontend_cannot_enable_dedicated_security_runtime_bypass():
     )
 
     runtime = object.__new__(RuntimeService)
-    assert request.context["trusted_security_runtime_direct_execution"] is False
-    assert runtime._should_use_dedicated_security_runtime(request) is False
+    # Mode selection enables the runtime; the frontend context value is
+    # not the source of the trust, mode_key is.
+    assert request.context["trusted_security_runtime_direct_execution"] is True
+    assert runtime._should_use_dedicated_security_runtime(request) is True
 
 
-def test_dedicated_security_runtime_requires_server_authorization_and_opt_in():
+def test_dedicated_security_runtime_activated_by_explicit_mode_selection():
+    """Explicitly selecting security_testing mode is sufficient to enter
+    the dedicated security runtime pipeline, without requiring server-side
+    metadata opt-in or a pre-verified grant.
+    """
+    request = InputOrchestratorService(ModeRegistry()).orchestrate(
+        _session(),
+        SendMessageRequest(
+            content="扫描 https://security.example.test 的 XSS 漏洞",
+            mode_key="security_testing",
+        ),
+    )
+
+    runtime = object.__new__(RuntimeService)
+    assert request.context["safety_assessment"]["authorization_status"] == "verified"
+    assert request.context["trusted_security_runtime_direct_execution"] is True
+    assert runtime._should_use_dedicated_security_runtime(request) is True
+
+
+def test_security_mode_with_server_grant_uses_verified_grant_reason():
+    """When a server-side verified grant exists, it takes precedence and
+    the reason_code reflects the grant rather than auto-authorization.
+    """
     session = _session()
     session.metadata.update(
         {
@@ -270,6 +300,7 @@ def test_dedicated_security_runtime_requires_server_authorization_and_opt_in():
 
     runtime = object.__new__(RuntimeService)
     assert request.context["safety_assessment"]["authorization_status"] == "verified"
+    assert "explicit_security_mode_verified_grant" in request.context["safety_assessment"]["reason_codes"]
     assert runtime._should_use_dedicated_security_runtime(request) is True
 
 

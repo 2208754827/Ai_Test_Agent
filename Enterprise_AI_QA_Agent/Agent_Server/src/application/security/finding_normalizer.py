@@ -13,6 +13,8 @@ from src.modes.security_testing_mode.campaign_state import FindingRecord
 class FindingNormalizer:
     """Normalize tool parser output into FindingRecord objects."""
 
+    _IMPACT_LEVELS = {"none", "low", "medium", "high"}
+
     def from_nmap(self, parsed: dict[str, Any], task_id: str = "") -> list[FindingRecord]:
         findings: list[FindingRecord] = []
         for port_info in parsed.get("open_ports", []):
@@ -212,6 +214,64 @@ class FindingNormalizer:
             status_code=parsed.get("status_code") if isinstance(parsed.get("status_code"), int) else None,
         )
 
+    def from_data_impact_result(
+        self,
+        parsed: dict[str, Any],
+        task_id: str = "",
+    ) -> list[FindingRecord]:
+        """Normalize an explicit, evidence-backed data-impact proof."""
+        if not isinstance(parsed, dict):
+            return []
+        data_types = self._string_list(parsed.get("exposed_data_types"))
+        estimate = self._non_negative_int(parsed.get("exposed_record_estimate"))
+        confidentiality = self._impact_level(parsed.get("confidentiality_impact"))
+        integrity = self._impact_level(parsed.get("integrity_impact"))
+        availability = self._impact_level(parsed.get("availability_impact"))
+        proof_present = bool(
+            data_types
+            or (estimate is not None and estimate > 0)
+            or any(item != "none" for item in (confidentiality, integrity, availability))
+        )
+        impact_verified = bool(parsed.get("impact_verified")) and proof_present
+        target = str(parsed.get("target") or parsed.get("url") or "")
+        finding = FindingRecord(
+            finding_id=str(parsed.get("finding_id") or str(uuid.uuid4())[:8]),
+            title=str(parsed.get("title") or "数据影响证明"),
+            category=str(parsed.get("category") or "information_disclosure"),
+            surface_type=str(parsed.get("surface_type") or "web"),
+            severity=str(parsed.get("severity") or ("high" if impact_verified else "medium")),
+            confidence=str(parsed.get("confidence") or ("confirmed" if impact_verified else "medium")),
+            cvss_score=parsed.get("cvss_score") if isinstance(parsed.get("cvss_score"), (int, float)) else None,
+            cvss_vector=str(parsed.get("cvss_vector") or ""),
+            cvss_rationale=str(parsed.get("cvss_rationale") or ""),
+            cwe_ids=self._string_list(parsed.get("cwe_ids")),
+            owasp_categories=self._string_list(parsed.get("owasp_categories")),
+            affected_target=target,
+            affected_port=parsed.get("affected_port") if isinstance(parsed.get("affected_port"), int) else None,
+            affected_service=str(parsed.get("affected_service") or ""),
+            description=str(parsed.get("description") or ""),
+            evidence_summary=str(parsed.get("evidence_summary") or ""),
+            reproduction_steps=self._string_list(parsed.get("reproduction_steps")),
+            recommendation=str(parsed.get("recommendation") or ""),
+            source_task_ids=[task_id] if task_id else [],
+            verified=impact_verified,
+            verification_level="impact_verified" if impact_verified else (
+                "exploitable" if parsed.get("exploitable") else "confirmed"
+            ),
+            evidence_ids=self._string_list(parsed.get("evidence_ids")),
+            exposed_data_types=data_types,
+            exposed_record_estimate=estimate,
+            confidentiality_impact=confidentiality,
+            integrity_impact=integrity,
+            availability_impact=availability,
+        )
+        if not finding.reproduction_steps:
+            finding.reproduction_steps = [
+                f"Replay the authorized proof profile against {target or '<target>'}.",
+                "Confirm the response exposes only the approved redacted sample and record the impact evidence.",
+            ]
+        return [finding]
+
     def from_hydra(self, parsed: dict[str, Any], task_id: str = "") -> list[FindingRecord]:
         findings: list[FindingRecord] = []
         for cred in parsed.get("credentials_found", []):
@@ -248,11 +308,34 @@ class FindingNormalizer:
             "nikto": self.from_nikto,
             "hydra": self.from_hydra,
             "http_headers": self.from_http_headers_result,
+            "data_impact": self.from_data_impact_result,
         }
         fn = dispatch.get(parser_key)
         if fn is None:
             return []
         return fn(parsed, task_id=task_id)
+
+    @staticmethod
+    def _string_list(value: Any) -> list[str]:
+        if isinstance(value, str):
+            value = [value]
+        if not isinstance(value, (list, tuple, set)):
+            return []
+        return list(dict.fromkeys(str(item).strip() for item in value if str(item).strip()))
+
+    @staticmethod
+    def _non_negative_int(value: Any) -> int | None:
+        if isinstance(value, bool):
+            return None
+        try:
+            resolved = int(value)
+        except (TypeError, ValueError):
+            return None
+        return resolved if resolved >= 0 else None
+
+    def _impact_level(self, value: Any) -> str:
+        normalized = str(value or "none").strip().lower()
+        return normalized if normalized in self._IMPACT_LEVELS else "none"
 
 
 __all__ = ["FindingNormalizer"]

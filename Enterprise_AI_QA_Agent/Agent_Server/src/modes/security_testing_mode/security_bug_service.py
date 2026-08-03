@@ -174,6 +174,56 @@ class SecurityBugService:
         )
         return stored
 
+    async def sync_bug_retest(
+        self,
+        bug_id: str,
+        campaign: SecurityCampaign,
+        *,
+        session_id: str,
+    ) -> SecurityBugRecord:
+        """Apply one retest campaign to one Bug without mutating unrelated Bugs."""
+        bug = await self._store.get(bug_id)
+        if bug is None:
+            raise KeyError(f"Security Bug not found: {bug_id}")
+        finding_by_id = {item.finding_id: item for item in campaign.findings}
+        for attempt in campaign.verification_attempts:
+            if attempt.status != "succeeded" or not attempt.evidence_ids:
+                continue
+            for finding_id in attempt.finding_ids:
+                finding = finding_by_id.get(finding_id)
+                if finding is None:
+                    continue
+                candidate = self._build_candidate(
+                    campaign=campaign,
+                    finding=finding,
+                    attempt=attempt,
+                    session_id=session_id,
+                )
+                if candidate is None or candidate.fingerprint != bug.fingerprint:
+                    continue
+                stored, _created = await self._store.upsert_observation(candidate)
+                self._log_event(
+                    "security.bug.retested",
+                    stored,
+                    campaign_id=campaign.campaign_id,
+                    session_id=session_id,
+                    outcome="reproduced",
+                    status=stored.status,
+                )
+                campaign.security_bugs = [stored]
+                return stored
+        if bug.status == "fixed":
+            closed = await self._close_one_fixed_bug_not_reproduced(
+                bug=bug,
+                campaign=campaign,
+                session_id=session_id,
+            )
+            if closed is not None:
+                campaign.security_bugs = [closed]
+                return closed
+        campaign.security_bugs = [bug]
+        return bug
+
     def _build_candidate(
         self,
         *,
@@ -204,6 +254,7 @@ class SecurityBugService:
             attempt=attempt,
             session_id=session_id,
         )
+        impact = self._impact_details(finding)
         preconditions = [
             f"The verified authorization scope includes {target}.",
             "The approved isolated security runner can reach the target.",
@@ -220,6 +271,7 @@ class SecurityBugService:
             cvss_rationale,
             cwe_ids,
             owasp_categories,
+            impact["proof_present"] if finding.verification_level == "impact_verified" else True,
         )
         if self._reproduction_required and not all(required):
             return None
@@ -267,9 +319,11 @@ class SecurityBugService:
             actual_result=actual_result,
             evidence_ids=evidence_ids,
             evidence_refs=evidence_refs,
-            confidentiality_impact="none",
-            integrity_impact="none",
-            availability_impact="none",
+            exposed_data_types=impact["exposed_data_types"],
+            exposed_record_estimate=impact["exposed_record_estimate"],
+            confidentiality_impact=impact["confidentiality_impact"],
+            integrity_impact=impact["integrity_impact"],
+            availability_impact=impact["availability_impact"],
             business_impact=self._business_impact(finding),
             remediation=finding.recommendation,
             regression_case_id=f"reg_{fingerprint[:20]}",
@@ -353,6 +407,66 @@ class SecurityBugService:
                 status="closed",
             )
         return closed
+
+    async def _close_one_fixed_bug_not_reproduced(
+        self,
+        *,
+        bug: SecurityBugRecord,
+        campaign: SecurityCampaign,
+        session_id: str,
+    ) -> SecurityBugRecord | None:
+        task = self._completed_regression_task(campaign.tasks, bug)
+        if task is None:
+            return None
+        artifacts = [
+            item
+            for item in campaign.evidence
+            if item.source_task_id == task.task_id
+        ]
+        if not artifacts or not (task.raw_output or task.parsed_result):
+            return None
+        now = task.completed_at or _utc_now()
+        evidence_refs = [
+            SecurityBugEvidenceRef(
+                campaign_id=campaign.campaign_id,
+                session_id=session_id,
+                artifact_id=item.artifact_id,
+                source_task_id=item.source_task_id,
+                created_at=item.created_at or now,
+            )
+            for item in artifacts
+        ]
+        retest = SecurityBugRetestRecord(
+            retest_id=f"retest_{self._stable_hash(f'{campaign.campaign_id}|{bug.fingerprint}|closed')}",
+            campaign_id=campaign.campaign_id,
+            session_id=session_id,
+            outcome="not_reproduced",
+            verification_level=bug.verification_level,
+            actual_result=(
+                f"Regression profile {bug.regression_profile} completed with new evidence; "
+                "the stored trigger was not reproduced."
+            ),
+            evidence_refs=evidence_refs,
+            tested_at=now,
+        )
+        bug.status = "closed"
+        bug.last_seen_at = now
+        bug.campaign_ids = list(dict.fromkeys([*bug.campaign_ids, campaign.campaign_id]))
+        bug.evidence_refs.extend(evidence_refs)
+        bug.evidence_ids = list(dict.fromkeys(
+            [*bug.evidence_ids, *(item.artifact_id for item in artifacts)]
+        ))
+        bug.retest_history.append(retest)
+        stored = await self._store.save(bug)
+        self._log_event(
+            "security.bug.retested",
+            stored,
+            campaign_id=campaign.campaign_id,
+            session_id=session_id,
+            outcome="not_reproduced",
+            status="closed",
+        )
+        return stored
 
     def _completed_regression_task(
         self,
@@ -440,8 +554,51 @@ class SecurityBugService:
                 "were not demonstrated by this non-destructive test."
             )
         if finding.verification_level == "impact_verified":
-            return "Impact was demonstrated by the linked evidence; review exposed data and affected operations."
+            exposed = ", ".join(finding.exposed_data_types) or "structured impact"
+            records = (
+                str(finding.exposed_record_estimate)
+                if finding.exposed_record_estimate is not None
+                else "an unquantified"
+            )
+            return (
+                f"Impact was demonstrated by linked evidence: {exposed}; "
+                f"approximately {records} record(s) were exposed. Review the redacted evidence "
+                "and affected operations."
+            )
         return "The defect is reproducible, but broader business impact was not demonstrated by this test."
+
+    def _impact_details(self, finding: FindingRecord) -> dict[str, object]:
+        exposed_data_types = list(
+            dict.fromkeys(
+                self._sanitize_text(item, limit=120)
+                for item in finding.exposed_data_types
+                if str(item or "").strip()
+            )
+        )[:20]
+        estimate = finding.exposed_record_estimate
+        if isinstance(estimate, bool) or not isinstance(estimate, int) or estimate < 0:
+            estimate = None
+        levels = {
+            "confidentiality_impact": self._impact_level(finding.confidentiality_impact),
+            "integrity_impact": self._impact_level(finding.integrity_impact),
+            "availability_impact": self._impact_level(finding.availability_impact),
+        }
+        proof_present = bool(
+            exposed_data_types
+            or (estimate is not None and estimate > 0)
+            or any(value != "none" for value in levels.values())
+        )
+        return {
+            "exposed_data_types": exposed_data_types,
+            "exposed_record_estimate": estimate,
+            **levels,
+            "proof_present": proof_present,
+        }
+
+    @staticmethod
+    def _impact_level(value: str) -> str:
+        normalized = str(value or "none").strip().lower()
+        return normalized if normalized in {"none", "low", "medium", "high"} else "none"
 
     def _cvss(self, finding: FindingRecord) -> tuple[str, float | None, str]:
         if finding.cvss_vector:
