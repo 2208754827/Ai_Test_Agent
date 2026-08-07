@@ -233,6 +233,12 @@ class ApiSubagentCoordinator:
                 "api_task_id": task.task_id,
                 "api_execution_mode": task.execution_mode,
             },
+            "allowed_tool_keys": [
+                "api-test-runner",
+                "api-docs-library",
+                "api-tester",
+                "observation-search",
+            ],
         }
 
     async def _wait_for_sessions(self, child_session_ids: list[str]) -> list[Any]:

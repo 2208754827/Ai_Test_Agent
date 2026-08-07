@@ -35,6 +35,7 @@ class WorkerDispatchSpec:
     model_key: str | None = None
     skill_keys: list[str] = field(default_factory=list)
     context: dict[str, Any] = field(default_factory=dict)
+    allowed_tool_keys: list[str] = field(default_factory=list)
 
 
 class CoordinatorRuntimeService:
@@ -68,6 +69,9 @@ class CoordinatorRuntimeService:
         parent_session = await self._store.get_session(parent_session_id)
         if parent_session is None:
             raise KeyError(f"Parent session not found: {parent_session_id}")
+
+        # Extract parent context for child session inheritance
+        parent_inherited_context = await self._build_inherited_context(parent_session_id)
 
         if self._is_dispatch_blocked(parent_session, parent_turn_id):
             guard = self._get_failure_guard(parent_session)
@@ -128,7 +132,9 @@ class CoordinatorRuntimeService:
                         "worker_description": worker.description,
                         "dispatch_role": dispatch_role,
                         "notification_mode": "task-notification",
+                        **({"allowed_tool_keys": worker.allowed_tool_keys} if worker.allowed_tool_keys else {}),
                     },
+                    inherited_context=parent_inherited_context,
                 )
             )
 
@@ -725,6 +731,7 @@ class CoordinatorRuntimeService:
                 "model_key": worker.model_key,
                 "skill_keys": list(worker.skill_keys),
                 "context": dict(worker.context),
+                "allowed_tool_keys": list(worker.allowed_tool_keys),
             }
             for worker in workers
         ]
@@ -757,6 +764,7 @@ class CoordinatorRuntimeService:
             "model_key": worker.model_key,
             "skill_keys": list(worker.skill_keys),
             "context": dict(worker.context),
+            "allowed_tool_keys": list(worker.allowed_tool_keys),
             "parent_turn_id": parent_turn_id,
             "parent_trace_id": parent_trace_id,
         }
@@ -859,6 +867,11 @@ class CoordinatorRuntimeService:
                     model_key=str(item.get("model_key") or "").strip() or None,
                     skill_keys=skill_keys,
                     context=dict(item.get("context", {})) if isinstance(item.get("context"), dict) else {},
+                    allowed_tool_keys=[
+                        str(key).strip()
+                        for key in item.get("allowed_tool_keys", [])
+                        if str(key).strip()
+                    ],
                 )
             )
         return workers
@@ -891,6 +904,11 @@ class CoordinatorRuntimeService:
                     model_key=str(item.get("model_key") or "").strip() or None,
                     skill_keys=skill_keys,
                     context=dict(item.get("context", {})) if isinstance(item.get("context"), dict) else {},
+                    allowed_tool_keys=[
+                        str(key).strip()
+                        for key in item.get("allowed_tool_keys", [])
+                        if str(key).strip()
+                    ],
                 )
             )
         return workers
@@ -917,6 +935,11 @@ class CoordinatorRuntimeService:
             model_key=str(raw_item.get("model_key") or "").strip() or None,
             skill_keys=skill_keys,
             context=dict(raw_item.get("context", {})) if isinstance(raw_item.get("context"), dict) else {},
+            allowed_tool_keys=[
+                str(key).strip()
+                for key in raw_item.get("allowed_tool_keys", [])
+                if str(key).strip()
+            ],
         )
 
     async def _maybe_launch_completion_worker(
@@ -961,6 +984,11 @@ class CoordinatorRuntimeService:
                 if str(skill_key).strip()
             ],
             context=dict(pending.get("context", {})) if isinstance(pending.get("context"), dict) else {},
+            allowed_tool_keys=[
+                str(key).strip()
+                for key in pending.get("allowed_tool_keys", [])
+                if str(key).strip()
+            ],
         )
         if not worker.prompt or not worker.agent_key:
             return None
@@ -989,7 +1017,9 @@ class CoordinatorRuntimeService:
                     "worker_description": worker.description,
                     "dispatch_role": "completion_worker",
                     "notification_mode": "task-notification",
+                    **({"allowed_tool_keys": worker.allowed_tool_keys} if worker.allowed_tool_keys else {}),
                 },
+                inherited_context=await self._build_inherited_context(parent_session_id),
             )
         )
 
@@ -1091,6 +1121,11 @@ class CoordinatorRuntimeService:
                     if str(skill_key).strip()
                 ],
                 context=dict(item.get("context", {})) if isinstance(item.get("context"), dict) else {},
+                allowed_tool_keys=[
+                    str(key).strip()
+                    for key in item.get("allowed_tool_keys", [])
+                    if str(key).strip()
+                ],
             )
             if not worker.prompt or not worker.agent_key:
                 continue
@@ -1133,7 +1168,9 @@ class CoordinatorRuntimeService:
                         "worker_description": worker.description,
                         "dispatch_role": "debate_followup",
                         "notification_mode": "task-notification",
+                        **({"allowed_tool_keys": worker.allowed_tool_keys} if worker.allowed_tool_keys else {}),
                     },
+                    inherited_context=await self._build_inherited_context(parent_session_id),
                 )
             )
 
@@ -1388,6 +1425,37 @@ class CoordinatorRuntimeService:
     def _resolve_worker_mode_key(self, worker: WorkerDispatchSpec) -> str:
         mode_key = str(worker.context.get("mode_key") or "").strip()
         return mode_key or "default"
+
+    async def _build_inherited_context(self, parent_session_id: str) -> dict[str, Any]:
+        """Extract context from the parent session's latest snapshot for child session inheritance."""
+        parent_session = await self._store.get_session(parent_session_id)
+        if parent_session is None:
+            return {}
+        latest_snapshot = await self._store.get_latest_snapshot(parent_session_id)
+        if latest_snapshot is None or not latest_snapshot.graph_state:
+            return {}
+        gs = latest_snapshot.graph_state
+        inherited: dict[str, Any] = {}
+        # Inherit observation hits (top 5 to keep context lean)
+        observation_hits = gs.get("observation_hits")
+        if isinstance(observation_hits, list) and observation_hits:
+            inherited["observation_hits"] = observation_hits[:5]
+        # Inherit observation prompt blocks
+        observation_prompt_blocks = gs.get("observation_prompt_blocks")
+        if isinstance(observation_prompt_blocks, list) and observation_prompt_blocks:
+            inherited["observation_prompt_blocks"] = observation_prompt_blocks
+        # Inherit memory hits (top 5)
+        memory_hits = gs.get("memory_hits")
+        if isinstance(memory_hits, list) and memory_hits:
+            inherited["memory_hits"] = memory_hits[:5]
+        # Inherit key context bundle fields
+        parent_bundle = gs.get("context_bundle")
+        if isinstance(parent_bundle, dict):
+            inherited["parent_context_bundle"] = {
+                k: v for k, v in parent_bundle.items()
+                if k in {"mode_key", "session_mode", "runtime_mode", "preferred_model"}
+            }
+        return inherited
 
     def _get_failure_guard(self, session) -> dict[str, Any]:
         guard = session.metadata.get("worker_failure_guard", {})

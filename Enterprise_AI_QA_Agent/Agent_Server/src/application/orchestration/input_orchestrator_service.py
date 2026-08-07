@@ -276,6 +276,14 @@ class InputOrchestratorService:
         context["trusted_security_runtime_direct_execution"] = bool(
             session.metadata.get("security_runtime_direct_execution", False)
         )
+        # Propagate child tool whitelist from session metadata to context_bundle
+        allowed_tool_keys_meta = session.metadata.get("allowed_tool_keys")
+        if isinstance(allowed_tool_keys_meta, list) and allowed_tool_keys_meta:
+            context["allowed_tool_keys"] = list(allowed_tool_keys_meta)
+        # Propagate inherited context from session metadata to context_bundle
+        inherited_context_meta = session.metadata.get("inherited_context")
+        if isinstance(inherited_context_meta, dict) and inherited_context_meta:
+            context["inherited_context"] = dict(inherited_context_meta)
         if mode_intent_state is not None:
             context.update(self._build_mode_intent_context(mode.key, mode_intent_state))
         payload_agent_key = (payload.agent_key or "").strip()

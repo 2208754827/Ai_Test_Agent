@@ -61,12 +61,14 @@ def build_finalizer_node(
                     max_iterations=state["max_iterations"],
                 )
             else:
+                state["skip_routing"] = True
+                state["loop_iteration"] += 1
                 append_graph_event(
                     state,
                     "graph.loop_continuing",
                     "finalizer",
                     "Runtime will continue into the next recursive model iteration.",
-                    next_iteration=state["loop_iteration"] + 1,
+                    next_iteration=state["loop_iteration"],
                     max_iterations=state["max_iterations"],
                 )
                 return state

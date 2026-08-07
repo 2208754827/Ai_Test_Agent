@@ -133,6 +133,8 @@ class SessionService:
             selected_agent=payload.selected_agent or mode.default_agent_key,
             metadata=payload.metadata,
         )
+        if payload.inherited_context:
+            session.metadata["inherited_context"] = payload.inherited_context
         await self._store.save_session(session)
         await self._store.append_event(
             session.id,

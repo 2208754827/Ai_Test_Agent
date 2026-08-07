@@ -3,11 +3,14 @@ import { computed } from "vue";
 
 import type { ServiceCheckItem, SystemStatusSummary } from "../../types";
 import { t } from "../../services/i18n";
+import { useSessionHistoryStore } from "../../stores/sessionHistory";
 
 const props = defineProps<{
   label: string;
   systemStatus: SystemStatusSummary;
 }>();
+
+const historyStore = useSessionHistoryStore();
 
 const failingChecks = computed(() =>
   props.systemStatus.checks.filter((check) => check.status !== "online"),
@@ -27,6 +30,13 @@ function statusIcon(check: ServiceCheckItem) {
 <template>
   <header class="top-status-bar">
     <div class="top-status-path">
+      <button
+        class="session-toggle-btn"
+        :title="t('sessionHistory.toggle_panel')"
+        @click="historyStore.togglePanel()"
+      >
+        <i class="fa-solid fa-clock-rotate-left"></i>
+      </button>
       <img src="/logo.svg" alt="" class="brand-logo brand-logo-topbar" />
       <span>{{ t("home.title") }} / {{ props.label }}</span>
     </div>

@@ -11,6 +11,18 @@ def build_context_builder_node(
     memory_runtime_service: MemoryRuntimeService | None = None,
 ):
     async def context_builder(state: AgentGraphState) -> AgentGraphState:
+        # On loop iterations, skip the expensive context/routing/permission
+        # pipeline — only prompt_assembler→model_invoker→tool_executor→finalizer reruns.
+        if state.get("skip_routing") and state["loop_iteration"] > 0:
+            append_graph_event(
+                state,
+                "graph.context_builder_skipped",
+                "context_builder",
+                "Context builder skipped on loop iteration (skip_routing=True).",
+                loop_iteration=state["loop_iteration"],
+            )
+            return state
+
         context = dict(state["context_bundle"])
         state["observation_hits"] = []
         state["observation_prompt_blocks"] = []
@@ -71,6 +83,39 @@ def build_context_builder_node(
                 "harness_flags": harness_flags,
             }
         )
+
+        # Inject inherited context from parent session (set by coordinator dispatch)
+        inherited = context.get("inherited_context") or {}
+        if isinstance(inherited, dict) and inherited:
+            parent_obs = inherited.get("observation_hits", [])
+            if isinstance(parent_obs, list) and parent_obs:
+                for hit in parent_obs:
+                    if isinstance(hit, dict):
+                        hit.setdefault("metadata", {})["source"] = "parent_inheritance"
+                state["observation_hits"] = parent_obs + state["observation_hits"]
+
+            parent_mem = inherited.get("memory_hits", [])
+            if isinstance(parent_mem, list) and parent_mem:
+                for hit in parent_mem:
+                    if isinstance(hit, dict):
+                        hit.setdefault("metadata", {})["source"] = "parent_inheritance"
+                state["memory_hits"] = parent_mem + (state.get("memory_hits") or [])
+
+            parent_bundle = inherited.get("parent_context_bundle", {})
+            if isinstance(parent_bundle, dict):
+                for key, value in parent_bundle.items():
+                    if key not in context:
+                        context[key] = value
+
+            append_graph_event(
+                state,
+                "graph.inherited_context_injected",
+                "context_builder",
+                "Parent session context has been injected into this child worker session.",
+                parent_observation_count=len(parent_obs) if isinstance(parent_obs, list) else 0,
+                parent_memory_count=len(parent_mem) if isinstance(parent_mem, list) else 0,
+            )
+
         state["context_bundle"] = context
         append_graph_event(
             state,

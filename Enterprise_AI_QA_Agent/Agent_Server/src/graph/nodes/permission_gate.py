@@ -12,10 +12,35 @@ def build_permission_gate(
     tool_registry: ToolRegistry,
 ):
     def permission_gate(state: AgentGraphState) -> AgentGraphState:
+        # On loop iterations, skip permission re-evaluation — permissions stay the same within a turn.
+        if state.get("skip_routing") and state["loop_iteration"] > 0:
+            append_graph_event(
+                state,
+                "graph.permission_gate_skipped",
+                "permission_gate",
+                "Permission gate skipped on loop iteration (skip_routing=True).",
+                loop_iteration=state["loop_iteration"],
+            )
+            return state
+
         tool_descriptors = tool_registry.get_many(state["available_tool_keys"])
         input_envelope = dict(state.get("context_bundle", {}).get("input_envelope") or {})
         input_routing = dict(state.get("context_bundle", {}).get("input_routing") or {})
         safety_assessment = dict(state.get("context_bundle", {}).get("safety_assessment") or {})
+
+        # Extract child tool whitelist from context (set by coordinator dispatch → input_orchestrator)
+        child_tool_whitelist: list[str] | None = None
+        context_bundle = state.get("context_bundle") or {}
+        # Primary location: context_bundle.allowed_tool_keys (set by input_orchestrator from session.metadata)
+        whitelist_raw = context_bundle.get("allowed_tool_keys")
+        # Fallback: context_bundle.session_resources.allowed_tool_keys
+        if not isinstance(whitelist_raw, list) or not whitelist_raw:
+            session_resources = context_bundle.get("session_resources") or {}
+            if isinstance(session_resources, dict):
+                whitelist_raw = session_resources.get("allowed_tool_keys")
+        if isinstance(whitelist_raw, list) and whitelist_raw:
+            child_tool_whitelist = [str(key).strip() for key in whitelist_raw if str(key).strip()]
+
         policy_context = PermissionPolicyContext(
             session_mode=SessionMode(state["session_mode"]),
             runtime_mode=RuntimeMode(state["runtime_mode"]),
@@ -30,6 +55,7 @@ def build_permission_gate(
             safety_risk_level=str(safety_assessment.get("risk_level") or "low"),
             authorization_status=str(safety_assessment.get("authorization_status") or "not_required"),
             environment=str(safety_assessment.get("environment") or "unknown"),
+            child_tool_whitelist=child_tool_whitelist,
         )
         evaluation = permission_service.evaluate(
             policy_context=policy_context,

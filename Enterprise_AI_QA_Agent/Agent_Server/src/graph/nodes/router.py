@@ -28,6 +28,17 @@ def build_router_node(
     prompt_injection_policy = PromptInjectionPolicy()
 
     async def router(state: AgentGraphState) -> AgentGraphState:
+        # On loop iterations, skip routing — agent/model/skills/permissions stay the same.
+        if state.get("skip_routing") and state["loop_iteration"] > 0:
+            append_graph_event(
+                state,
+                "graph.router_skipped",
+                "router",
+                "Router skipped on loop iteration (skip_routing=True).",
+                loop_iteration=state["loop_iteration"],
+            )
+            return state
+
         requested_agent = state["selected_agent_key"] or "auto"
         requested_model = state["selected_model_key"] or state["preferred_model"] or "auto"
         agent = agent_registry.resolve_for_message(

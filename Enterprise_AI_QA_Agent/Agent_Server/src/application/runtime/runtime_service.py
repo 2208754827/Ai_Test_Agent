@@ -360,6 +360,14 @@ class RuntimeService:
             return
         context_bundle = dict(state.get("context_bundle") or {})
         context_bundle["session_resources"] = await self._session_resource_service.build_context(session_id)
+        # Propagate allowed_tool_keys from session metadata into context_bundle
+        # so that permission_gate can apply the child tool whitelist
+        allowed_tool_keys_meta = context_bundle.get("allowed_tool_keys")
+        if not isinstance(allowed_tool_keys_meta, list) or not allowed_tool_keys_meta:
+            # Also check session metadata via the request context (set by input_orchestrator)
+            allowed_tool_keys_meta = state.get("context_bundle", {}).get("allowed_tool_keys")
+        if isinstance(allowed_tool_keys_meta, list) and allowed_tool_keys_meta:
+            context_bundle.setdefault("allowed_tool_keys", allowed_tool_keys_meta)
         state["context_bundle"] = context_bundle
 
     def _build_initial_state(self, session: SessionRecord, request: ExecutionRequest) -> dict[str, Any]:
@@ -426,8 +434,13 @@ class RuntimeService:
             "loop_iteration": 0,
             "max_iterations": self._max_iterations,
             "continue_loop": False,
+            "skip_routing": False,
             "termination_reason": "",
         }
+        # Inject inherited context from session metadata (set by coordinator dispatch)
+        inherited_context = session.metadata.get("inherited_context")
+        if isinstance(inherited_context, dict) and inherited_context:
+            initial_state["context_bundle"]["inherited_context"] = inherited_context
 
     def _should_use_dedicated_security_runtime(self, request: ExecutionRequest) -> bool:
         safety = request.context.get("safety_assessment")
@@ -637,33 +650,25 @@ class RuntimeService:
             "loop_iteration": int(graph_state.get("loop_iteration") or fallback_pending_turn.get("loop_iteration") or 0),
             "max_iterations": int(graph_state.get("max_iterations") or fallback_pending_turn.get("max_iterations") or self._max_iterations),
             "continue_loop": bool(graph_state.get("continue_loop") or False),
+            "skip_routing": bool(graph_state.get("skip_routing") or False),
             "termination_reason": str(graph_state.get("termination_reason") or fallback_pending_turn.get("latest_execution_stage") or ""),
         }
 
     async def _run_until_settled(self, state: dict[str, Any]) -> dict[str, Any]:
-        current_state = state
-        while True:
-            self._apply_interrupt_state(current_state)
-            if current_state["interrupt_requested"]:
-                return self._interrupt_result(current_state)
+        # The tool loop is now handled inside the LangGraph graph topology
+        # (finalizer → prompt_assembler conditional edge), so we only need
+        # a single graph invocation per turn. The loop_iteration counter
+        # and skip_routing flag are managed by the finalizer node.
+        state["skip_routing"] = False
+        self._apply_interrupt_state(state)
+        if state["interrupt_requested"]:
+            return self._interrupt_result(state)
 
-            result = await self._graph.ainvoke(current_state)
-            self._apply_interrupt_state(result)
-            if result["interrupt_requested"]:
-                return self._interrupt_result(result)
-            if not result["continue_loop"]:
-                return result
-
-            append_graph_event(
-                result,
-                "runtime.loop_reenter",
-                "runtime",
-                "Runtime is re-entering the recursive model loop for the same turn.",
-                next_iteration=result["loop_iteration"] + 1,
-                max_iterations=result["max_iterations"],
-            )
-            result["loop_iteration"] += 1
-            current_state = result
+        result = await self._graph.ainvoke(state)
+        self._apply_interrupt_state(result)
+        if result["interrupt_requested"]:
+            return self._interrupt_result(result)
+        return result
 
     def _convert_model_interruption_to_resumable(self, state: dict[str, Any]) -> None:
         summary = dict(state.get("model_response_summary") or {})

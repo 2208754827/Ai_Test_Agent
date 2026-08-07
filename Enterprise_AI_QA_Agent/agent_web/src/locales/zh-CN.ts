@@ -1458,4 +1458,18 @@ export default {
   "lang.id_ID": "Bahasa Indonesia",
   "lang.vi_VN": "Tiếng Việt",
   "lang.th_TH": "ไทย",
+
+  // Session History Panel
+  "sessionHistory.title": "会话历史",
+  "sessionHistory.new_chat": "新建会话",
+  "sessionHistory.untitled": "未命名会话",
+  "sessionHistory.resume": "恢复",
+  "sessionHistory.all_loaded": "已加载全部会话",
+  "sessionHistory.just_now": "刚刚",
+  "sessionHistory.minutes_ago": "分钟前",
+  "sessionHistory.hours_ago": "小时前",
+  "sessionHistory.days_ago": "天前",
+  "sessionHistory.toggle_panel": "切换会话列表面板",
+  "sessionHistory.switching": "正在切换会话...",
+  "sessionHistory.creating": "正在创建新会话...",
 } as Record<string, string>;

@@ -26,6 +26,20 @@ from src.registry.skills import SkillRegistry
 from src.registry.tools import ToolRegistry
 
 
+def route_after_finalizer(state: AgentGraphState) -> str:
+    """Route after finalizer: loop back to prompt_assembler or finish at responder.
+
+    When the finalizer determines that the tool loop should continue
+    (continue_loop=True, no pending approvals, and iterations remain),
+    we route back to prompt_assembler with skip_routing=True so that
+    context_builder/router/planner/permission_gate are bypassed on the
+    loop iteration — only the prompt→model→tool→finalize cycle reruns.
+    """
+    if state.get("continue_loop") and not state.get("pending_approvals"):
+        return "prompt_assembler"
+    return "responder"
+
+
 def build_agent_graph(
     agent_registry: AgentRegistry,
     tool_registry: ToolRegistry,
@@ -115,6 +129,13 @@ def build_agent_graph(
         },
     )
     graph.add_edge("tool_executor", "finalizer")
-    graph.add_edge("finalizer", "responder")
+    graph.add_conditional_edges(
+        "finalizer",
+        route_after_finalizer,
+        {
+            "prompt_assembler": "prompt_assembler",
+            "responder": "responder",
+        },
+    )
     graph.add_edge("responder", END)
     return graph.compile()

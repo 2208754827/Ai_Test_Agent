@@ -62,5 +62,6 @@ class AgentGraphState(TypedDict):
     loop_iteration: int
     max_iterations: int
     continue_loop: bool
+    skip_routing: bool
     termination_reason: str
     _event_queue: asyncio.Queue | None

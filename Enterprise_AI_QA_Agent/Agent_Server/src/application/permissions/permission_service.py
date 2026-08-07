@@ -28,6 +28,7 @@ class PermissionPolicyContext:
     safety_risk_level: str = "low"
     authorization_status: str = "not_required"
     environment: str = "unknown"
+    child_tool_whitelist: list[str] | None = None
 
 
 @dataclass
@@ -104,6 +105,31 @@ class PermissionService:
                 model_visible.append(tool.key)
             else:
                 hidden.append(tool.key)
+
+        # Apply child tool whitelist: restrict tools to only those in the whitelist
+        if policy_context.child_tool_whitelist is not None:
+            whitelist = set(policy_context.child_tool_whitelist)
+            all_tool_keys = [t.key for t in tools]
+            allowed = [t for t in allowed if t in whitelist]
+            approval_required = [t for t in approval_required if t in whitelist]
+            denied = [t for t in denied if t in whitelist] + [
+                t for t in all_tool_keys if t not in whitelist
+            ]
+            denied = list(dict.fromkeys(denied))
+            model_visible = [t for t in model_visible if t in whitelist]
+            hidden = [t for t in all_tool_keys if t not in model_visible]
+            # Update decisions to reflect whitelist denial
+            whitelisted_keys = whitelist
+            for decision in decisions:
+                if decision.tool_key not in whitelisted_keys:
+                    object.__setattr__(decision, "behavior", "deny")
+                    object.__setattr__(decision, "visibility", "hidden")
+                    object.__setattr__(decision, "reason", (
+                        f"Tool '{decision.tool_name}' is denied because it is not in the "
+                        "child session tool whitelist."
+                    ))
+                    object.__setattr__(decision, "reason_code", "child_tool_whitelist_denied")
+                    object.__setattr__(decision, "policy_key", "child_tool_whitelist")
 
         return PermissionEvaluation(
             allowed_tool_keys=allowed,

@@ -5,6 +5,17 @@ from src.runtime.execution_logging import append_graph_event
 
 
 def planner(state: AgentGraphState) -> AgentGraphState:
+    # On loop iterations, skip planning — the plan stays the same within a turn.
+    if state.get("skip_routing") and state["loop_iteration"] > 0:
+        append_graph_event(
+            state,
+            "graph.planner_skipped",
+            "planner",
+            "Planner skipped on loop iteration (skip_routing=True).",
+            loop_iteration=state["loop_iteration"],
+        )
+        return state
+
     state["plan_steps"] = [
         f"Align runtime context for session mode '{state['session_mode']}' and runtime mode '{state['runtime_mode']}'.",
         f"Route this turn to agent '{state['selected_agent_name']}' using model '{state['selected_model_name']}'.",

@@ -166,6 +166,7 @@ class CreateSessionRequest(BaseModel):
     preferred_model: str | None = None
     selected_agent: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
+    inherited_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class UpdateSessionRequest(BaseModel):

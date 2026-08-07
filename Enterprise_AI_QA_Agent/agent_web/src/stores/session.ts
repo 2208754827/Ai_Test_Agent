@@ -193,6 +193,7 @@ const EVENT_REFRESH_DEBOUNCE_MS = 220;
 const TOOLING_REFRESH_MIN_INTERVAL_MS = 10000;
 const EVENT_RECONNECT_DELAY_MS = 1500;
 const RECEIVED_EVENT_ID_LIMIT = 5000;
+const SESSION_ID_STORAGE_KEY = "enterprise-ai-qa-agent-active-session-id";
 
 function isActiveSessionStatus(status: SessionLifecycleStatus) {
   return status === "running" || status === "waiting_approval";
@@ -399,6 +400,7 @@ export const useSessionStore = defineStore("session", {
     pendingModeKeySelection: "",
     isBootstrapping: false,
     isSending: false,
+    isSwitching: false,
     resolvingApprovalIds: [] as string[],
     refreshTimer: null as number | null,
     scheduledRefreshTimer: null as number | null,
@@ -607,6 +609,21 @@ export const useSessionStore = defineStore("session", {
         this.selectedModeKey = modes[0]?.key ?? "default";
 
         if (!this.session) {
+          // Try to restore last active session from localStorage
+          const savedSessionId = window.localStorage.getItem(SESSION_ID_STORAGE_KEY);
+          if (savedSessionId) {
+            try {
+              const detail = await api.getSession(savedSessionId);
+              this.applySession(detail);
+              await this.refreshToolingData();
+              this.connectEvents();
+              return { agents, tools, modes };
+            } catch {
+              // Session no longer exists or API error; fall through to create new
+              window.localStorage.removeItem(SESSION_ID_STORAGE_KEY);
+            }
+          }
+          // No saved session or restore failed; create a new one
           const session = await api.createSession(
             "Enterprise Intelligent QA Session",
             this.selectedModeKey,
@@ -653,6 +670,7 @@ export const useSessionStore = defineStore("session", {
         return;
       }
       this.selectedModeKey = sessionModeKey || this.selectedModeKey;
+      this.persistSessionId();
     },
     connectEvents(force = false) {
       if (!this.session) {
@@ -799,6 +817,68 @@ export const useSessionStore = defineStore("session", {
       this.eventSource?.close();
       this.eventSource = null;
       this.eventStreamSessionId = "";
+    },
+    persistSessionId() {
+      if (this.session?.id) {
+        window.localStorage.setItem(SESSION_ID_STORAGE_KEY, this.session.id);
+      }
+    },
+    async switchToSession(sessionId: string) {
+      if (!sessionId || this.session?.id === sessionId || this.isSwitching) return;
+
+      this.isSwitching = true;
+      this.disconnectEvents();
+
+      // Clear transient state for the old session
+      this.activity = [];
+      this.replayTimeline = [];
+      this.replayMeta = null;
+      this.verificationMeta = null;
+      this.toolJobs = [];
+      this.sessionArtifacts = [];
+      this.selectedToolJob = null;
+      this.error = "";
+
+      try {
+        const detail = await api.getSession(sessionId);
+        this.applySession(detail);
+        await this.refreshToolingData(true);
+        this.connectEvents();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : "切换会话失败。";
+      } finally {
+        this.isSwitching = false;
+      }
+    },
+    async createAndSwitchToNewSession() {
+      if (this.isSwitching) return;
+
+      this.isSwitching = true;
+      this.disconnectEvents();
+
+      // Clear transient state
+      this.activity = [];
+      this.replayTimeline = [];
+      this.replayMeta = null;
+      this.verificationMeta = null;
+      this.toolJobs = [];
+      this.sessionArtifacts = [];
+      this.selectedToolJob = null;
+      this.messages = [];
+      this.error = "";
+
+      try {
+        const session = await api.createSession(
+          "Enterprise Intelligent QA Session",
+          this.selectedModeKey,
+        );
+        this.applySession(session);
+        this.connectEvents();
+      } catch (error) {
+        this.error = error instanceof Error ? error.message : "创建新会话失败。";
+      } finally {
+        this.isSwitching = false;
+      }
     },
     scheduleRefresh(includeTooling = false, delayMs = EVENT_REFRESH_DEBOUNCE_MS) {
       if (!this.session) {

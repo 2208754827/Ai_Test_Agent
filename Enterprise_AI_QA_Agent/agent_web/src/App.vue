@@ -6,6 +6,7 @@ import type { GlobalThemeOverrides } from "naive-ui";
 
 import AppSidebar from "./components/layout/AppSidebar.vue";
 import AppTopBar from "./components/layout/AppTopBar.vue";
+import SessionHistoryPanel from "./components/session/SessionHistoryPanel.vue";
 import { getLocale, t } from "./services/i18n";
 import { useAppStore } from "./stores/app";
 import { useSessionStore } from "./stores/session";
@@ -195,6 +196,7 @@ onBeforeUnmount(() => {
     <n-dialog-provider>
       <div class="prototype-shell">
         <AppSidebar />
+        <SessionHistoryPanel />
         <main class="prototype-main">
           <AppTopBar :label="pageLabel" :system-status="appStore.systemStatus" />
           <div class="prototype-content">

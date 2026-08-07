@@ -350,6 +350,16 @@ class SecuritySubagentCoordinator:
                 "platform_label": str(parent_bundle.get("platform_label") or ""),
                 "security_memory_scope": "session_only",
             },
+            "allowed_tool_keys": [
+                "security-scan-runner",
+                "network-recon-runner",
+                "web-scan-runner",
+                "service-audit-runner",
+                "credential-attack-runner",
+                "traffic-analysis-runner",
+                "exploit-workbench-runner",
+                "observation-search",
+            ],
         }
 
     async def _wait_for_sessions(
