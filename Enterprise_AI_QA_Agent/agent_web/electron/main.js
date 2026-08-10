@@ -207,6 +207,15 @@ function focusMainWindow() {
 }
 
 function registerDesktopIpc() {
+  ipcMain.handle("desktop:set-zoom-factor", (event, factor) => {
+    const numericFactor = Number(factor);
+    const normalizedFactor = Number.isFinite(numericFactor)
+      ? Math.min(1.5, Math.max(0.75, numericFactor))
+      : 1;
+    event.sender.setZoomFactor(normalizedFactor);
+    return normalizedFactor;
+  });
+
   ipcMain.handle("desktop:notify", (_event, payload) => {
     const normalized = normalizeNotificationPayload(payload);
     if (!normalized || !Notification.isSupported()) {

@@ -57,6 +57,42 @@ const fontSizeScaleMap: Record<AppFontSize, string> = {
   large: "1.18",
 };
 
+function setFontSizeVariables(root: HTMLElement, scale: string) {
+  const numericScale = Number(scale);
+  const normalizedScale = Number.isFinite(numericScale) ? numericScale : 1;
+  const size = (value: number) => `${Number((value * normalizedScale).toFixed(2))}px`;
+
+  root.style.setProperty("--app-font-size-scale", scale);
+  root.style.setProperty("--app-font-size", size(14));
+  root.style.setProperty("--app-font-size-mini", size(12));
+  root.style.setProperty("--app-font-size-tiny", size(12));
+  root.style.setProperty("--app-font-size-small", size(14));
+  root.style.setProperty("--app-font-size-medium", size(14));
+  root.style.setProperty("--app-font-size-large", size(15));
+  root.style.setProperty("--app-font-size-huge", size(16));
+}
+
+function applyInterfaceScale(scale: string) {
+  if (typeof document === "undefined") {
+    return;
+  }
+
+  const appRoot = document.getElementById("app");
+  if (appRoot) {
+    appRoot.style.removeProperty("zoom");
+  }
+
+  if (typeof window !== "undefined" && window.qaAgentDesktop?.setZoomFactor) {
+    window.qaAgentDesktop.setZoomFactor(Number(scale)).catch((error) => {
+      console.warn("Failed to apply desktop zoom factor", error);
+    });
+    document.body.style.removeProperty("font-size");
+    return;
+  }
+
+  document.body.style.setProperty("font-size", `var(--app-font-size)`);
+}
+
 function isLanguageCode(value: unknown): value is string {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -128,13 +164,11 @@ function applySettingsToDocument(settings: GeneralSettingsSnapshot) {
   root.dataset.appFont = settings.fontFamily;
   root.dataset.reduceMotion = settings.reduceMotion ? "true" : "false";
   root.style.setProperty("--app-font-family", fontFamilyMap[settings.fontFamily]);
-  root.style.setProperty("--app-font-size-scale", fontSizeScaleMap[settings.fontSize]);
-  // Scale the application content while leaving body unscaled. Naive UI teleports
-  // popups into body and needs that unscaled coordinate space for correct placement.
-  const appRoot = document.getElementById("app");
-  if (appRoot) {
-    appRoot.style.setProperty("zoom", fontSizeScaleMap[settings.fontSize]);
-  }
+  setFontSizeVariables(root, fontSizeScaleMap[settings.fontSize]);
+  // Use Chromium/Electron page zoom instead of CSS `zoom`. CSS `zoom` changes
+  // DOM subtree geometry without keeping teleported popups in the same coordinate
+  // system, which breaks Naive UI dropdown/popover placement.
+  applyInterfaceScale(fontSizeScaleMap[settings.fontSize]);
   // Sync i18n locale.
   setLocale(settings.language);
 }
@@ -222,12 +256,8 @@ export const useGeneralSettingsStore = defineStore("generalSettings", {
       root.dataset.appFont = patch.fontFamily;
       root.dataset.reduceMotion = patch.reduceMotion ? "true" : "false";
       root.style.setProperty("--app-font-family", fontFamilyMap[patch.fontFamily]);
-      root.style.setProperty("--app-font-size-scale", fontSizeScaleMap[patch.fontSize]);
-      // Keep zoom target consistent with applySettingsToDocument (on #app).
-      const appRoot = document.getElementById("app");
-      if (appRoot) {
-        appRoot.style.setProperty("zoom", fontSizeScaleMap[patch.fontSize]);
-      }
+      setFontSizeVariables(root, fontSizeScaleMap[patch.fontSize]);
+      applyInterfaceScale(fontSizeScaleMap[patch.fontSize]);
     },
 
     restoreAppearance() {

@@ -10,12 +10,14 @@ declare module "*.vue" {
 interface QaAgentDesktopBridge {
   isDesktop: boolean;
 
-    notify(payload: {
-        title: string;
-        body: string | undefined;
-        tag: string | undefined;
-        silent: boolean | null | undefined
-    }): Promise<boolean>;
+  notify(payload: {
+    title: string;
+    body: string | undefined;
+    tag: string | undefined;
+    silent: boolean | null | undefined;
+  }): Promise<boolean>;
+
+  setZoomFactor(factor: number): Promise<number>;
 }
 
 interface Window {
