@@ -24,6 +24,7 @@ class AgentRegistry:
                         "workflow-router",
                         "subagent-dispatch",
                         "knowledge-rag",
+                        "web_search",
                         "attachment-reader",
                         "session-history",
                         "session-timeline",
@@ -40,7 +41,7 @@ class AgentRegistry:
                         "mail-forward",
                         "mail-download-attachment",
                     ],
-                    supported_capabilities=["general.assistance", "mcp.external"],
+                    supported_capabilities=["general.assistance", "web.search", "mcp.external"],
                     supported_skills=["requirements-analysis", "risk-scoping", "report-synthesis", "mail-capability"],
                     tags=["core", "orchestration"],
                 )

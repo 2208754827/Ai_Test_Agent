@@ -242,6 +242,43 @@ class ToolRegistry:
                 ),
                 handler_key="knowledge-rag",
             ),
+            "web_search": ToolModule(
+                descriptor=ToolDescriptor(
+                    key="web_search",
+                    name="Web Search",
+                    description=(
+                        "Search the public web for current information and return structured results with "
+                        "titles, URLs, snippets, and source metadata."
+                    ),
+                    category="retrieval",
+                    permission_level="safe",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "The web search query."},
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of results to return.",
+                                "default": 5,
+                            },
+                            "time_range": {
+                                "type": "string",
+                                "description": "Optional freshness hint such as day, week, month, year, or all.",
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                    output_schema={
+                        "query": "string",
+                        "results": "array",
+                        "answer": "string",
+                        "provider": "string",
+                    },
+                    tags=["core", "web", "search", "current-information"],
+                    capability_keys=["web.search"],
+                ),
+                handler_key="web_search",
+            ),
             "api-docs-library": ToolModule(
                 descriptor=ToolDescriptor(
                     key="api-docs-library",

@@ -166,6 +166,8 @@ class Settings(BaseSettings):
     browser_action_timeout_seconds: int = 15
     runtime_max_iterations: int = 8
     coordinator_max_workers: int = 4
+    anysearch_api_base_url: str = "https://api.anysearch.com"
+    anysearch_api_key: str = ""
     # Context budget management
     context_compaction_watermark: float = 0.7
     context_max_tail_messages: int = 24

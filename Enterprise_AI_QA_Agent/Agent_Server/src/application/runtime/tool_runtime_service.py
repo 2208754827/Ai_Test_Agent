@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import httpx
+
 from src.application.context.memory_runtime_service import MemoryRuntimeService
 from src.application.context.mcp_runtime_service import MCPRuntimeService
 from src.application.artifacts.artifact_storage_service import ArtifactStorageService
@@ -68,7 +70,6 @@ CODE_REVIEW_RESULT_CATEGORY_LABELS = {
     "excellent": "优秀",
     "优秀": "优秀",
 }
-
 
 @dataclass
 class ToolExecutionContext:
@@ -197,6 +198,7 @@ class ToolRuntimeService:
             "workflow-router": self._run_workflow_router,
             "subagent-dispatch": self._run_subagent_dispatch,
             "knowledge-rag": self._run_knowledge_rag,
+            "web_search": self._run_web_search,
             "api-docs-library": self._run_api_docs_library,
             "attachment-reader": self._run_attachment_reader,
             "session-history": self._run_session_history,
@@ -625,6 +627,201 @@ class ToolRuntimeService:
             "chunks": selected,
             "query": query,
         }
+
+    async def _run_web_search(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> dict[str, Any]:
+        query = str(arguments.get("query") or context.normalized_input or context.user_message or "").strip()
+        limit = _clamp_int(arguments.get("limit"), default=5, minimum=1, maximum=10)
+        time_range = str(arguments.get("time_range") or "").strip()
+        if not query:
+            return {
+                "status": "failed",
+                "ok": False,
+                "summary": "Web Search requires a non-empty query.",
+                "error": "missing_query",
+                "provider": "anysearch",
+                "results": [],
+            }
+
+        payload: dict[str, Any] = {
+            "query": query,
+            "limit": limit,
+        }
+        if time_range:
+            payload["time_range"] = time_range
+        settings = self._settings or Settings()
+        api_key = settings.anysearch_api_key.strip()
+        if not api_key:
+            return {
+                "status": "failed",
+                "ok": False,
+                "summary": "AnySearch API key is not configured.",
+                "error": "missing_anysearch_api_key",
+                "provider": "anysearch",
+                "query": query,
+                "results": [],
+            }
+
+        try:
+            async with httpx.AsyncClient(
+                base_url=settings.anysearch_api_base_url.strip() or "https://api.anysearch.com",
+                timeout=min(max(self._request_timeout_seconds, 5), 30),
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "Enterprise-AI-QA-Agent/1.0",
+                },
+            ) as client:
+                response = await client.post("/v1/search", json=payload)
+        except httpx.TimeoutException:
+            return {
+                "status": "failed",
+                "ok": False,
+                "summary": "AnySearch request timed out.",
+                "error": "anysearch_timeout",
+                "provider": "anysearch",
+                "query": query,
+                "results": [],
+            }
+        except httpx.HTTPError as exc:
+            return {
+                "status": "failed",
+                "ok": False,
+                "summary": f"AnySearch request failed: {exc.__class__.__name__}.",
+                "error": "anysearch_request_failed",
+                "provider": "anysearch",
+                "query": query,
+                "results": [],
+            }
+
+        request_id = response.headers.get("x-request-id", "")
+        try:
+            response_payload = response.json()
+        except ValueError:
+            response_payload = {"message": response.text[:500]}
+
+        if response.status_code >= 400:
+            error_message = self._extract_anysearch_error(response_payload) or f"HTTP {response.status_code}"
+            if isinstance(response_payload, dict):
+                request_id = request_id or str(response_payload.get("request_id") or "")
+            return {
+                "status": "failed",
+                "ok": False,
+                "summary": f"AnySearch returned an error: {error_message}.",
+                "error": "anysearch_http_error",
+                "provider": "anysearch",
+                "query": query,
+                "status_code": response.status_code,
+                "request_id": request_id,
+                "results": [],
+            }
+
+        results = self._normalize_anysearch_results(response_payload, limit=limit)
+        answer = self._extract_anysearch_answer(response_payload)
+        return {
+            "status": "completed",
+            "ok": True,
+            "summary": f"AnySearch returned {len(results)} result(s) for query '{query}'.",
+            "provider": "anysearch",
+            "query": query,
+            "answer": answer,
+            "results": results,
+            "request_id": request_id,
+            "metrics": {
+                "returned_count": len(results),
+            },
+        }
+
+    def _normalize_anysearch_results(self, payload: Any, *, limit: int) -> list[dict[str, Any]]:
+        candidates = self._extract_anysearch_result_candidates(payload)
+        results: list[dict[str, Any]] = []
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or item.get("name") or item.get("headline") or "").strip()
+            url = str(
+                item.get("url")
+                or item.get("link")
+                or item.get("href")
+                or item.get("source_url")
+                or ""
+            ).strip()
+            snippet = str(
+                item.get("snippet")
+                or item.get("description")
+                or item.get("summary")
+                or item.get("content")
+                or item.get("text")
+                or ""
+            ).strip()
+            if not title and url:
+                title = url
+            if not title and not snippet:
+                continue
+            results.append(
+                {
+                    "title": title,
+                    "url": url,
+                    "snippet": snippet,
+                    "source": str(item.get("source") or item.get("site") or item.get("domain") or "").strip(),
+                    "published_at": str(
+                        item.get("published_at")
+                        or item.get("publishedAt")
+                        or item.get("date")
+                        or ""
+                    ).strip(),
+                }
+            )
+            if len(results) >= limit:
+                break
+        return results
+
+    def _extract_anysearch_result_candidates(self, payload: Any) -> list[Any]:
+        if isinstance(payload, list):
+            return payload
+        if not isinstance(payload, dict):
+            return []
+        for key in ("results", "items", "organic_results", "web", "documents"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+        data = payload.get("data")
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for key in ("results", "items", "organic_results", "web", "documents"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    return value
+        return []
+
+    def _extract_anysearch_answer(self, payload: Any) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        for key in ("answer", "summary", "response", "text"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        data = payload.get("data")
+        if isinstance(data, dict):
+            for key in ("answer", "summary", "response", "text"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ""
+
+    def _extract_anysearch_error(self, payload: Any) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        for key in ("message", "error", "detail"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
 
     async def _run_api_docs_library(
         self,
