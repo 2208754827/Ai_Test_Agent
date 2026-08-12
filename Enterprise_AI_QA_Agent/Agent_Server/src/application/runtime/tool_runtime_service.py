@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+import httpx
+
 from src.application.context.memory_runtime_service import MemoryRuntimeService
 from src.application.context.mcp_runtime_service import MCPRuntimeService
 from src.application.artifacts.artifact_storage_service import ArtifactStorageService
@@ -22,6 +24,7 @@ from src.application.mcp.host.connection_manager import McpConnectionManager
 from src.application.mcp.host.namespace import decode as decode_mcp_tool_key
 from src.application.mcp.host.namespace import is_mcp_tool_key
 from src.application.security.execution_environment_service import SecurityExecutionEnvironmentService
+from src.application.security.tool_bootstrap_service import ToolBootstrapService
 from src.application.security.output_safety_policy import OutputSafetyPolicy
 from src.application.security.resource_access_policy import ResourceAccessPolicy
 from src.modes.code_review_mode import build_code_review_campaign
@@ -68,7 +71,6 @@ CODE_REVIEW_RESULT_CATEGORY_LABELS = {
     "优秀": "优秀",
 }
 
-
 @dataclass
 class ToolExecutionContext:
     session_id: str
@@ -100,6 +102,8 @@ class ToolRuntimeService:
         mcp_connection_manager: McpConnectionManager | None = None,
         compatibility_runner_service=None,
         session_resource_service: SessionResourceService | None = None,
+        runtime_control=None,
+        security_bug_service=None,
     ) -> None:
         self._request_timeout_seconds = request_timeout_seconds
         self._settings = settings
@@ -122,6 +126,10 @@ class ToolRuntimeService:
         self._mail_service = MailService(self._email_config_store)
         self._report_template_service = ReportTemplateService()
         self._security_execution_environment = SecurityExecutionEnvironmentService(
+            settings=settings,
+            workspace_root=self._workspace_root,
+        )
+        self._security_tool_bootstrap_service = ToolBootstrapService(
             settings=settings,
             workspace_root=self._workspace_root,
         )
@@ -172,6 +180,9 @@ class ToolRuntimeService:
             report_template_service=self._report_template_service,
             runner_executor=self._execute_security_runner,
             report_delivery_executor=self._deliver_security_testing_report,
+            runtime_control=runtime_control,
+            security_bug_service=security_bug_service,
+            execution_environment_service=self._security_execution_environment,
         )
         self._performance_testing_mode_runtime = None
         if settings:
@@ -187,6 +198,7 @@ class ToolRuntimeService:
             "workflow-router": self._run_workflow_router,
             "subagent-dispatch": self._run_subagent_dispatch,
             "knowledge-rag": self._run_knowledge_rag,
+            "web_search": self._run_web_search,
             "api-docs-library": self._run_api_docs_library,
             "attachment-reader": self._run_attachment_reader,
             "session-history": self._run_session_history,
@@ -194,6 +206,7 @@ class ToolRuntimeService:
             "observation-search": self._run_observation_search,
             "mcp-bridge": self._run_mcp_bridge,
             "test-case-generator": self._run_test_case_generator,
+            "test-case-xlsx-exporter": self._run_test_case_xlsx_exporter,
             "ui-page-explorer": self._run_ui_page_explorer,
             "dom-inspector": self._run_dom_inspector,
             "browser-automation": self._run_browser_automation,
@@ -212,6 +225,7 @@ class ToolRuntimeService:
             "ui-automation-runner": self._run_ui_automation_runner,
             "api-test-runner": self._run_api_test_runner,
             "security-scan-runner": self._run_security_scan_runner,
+            "security-tool-bootstrap": self._run_security_tool_bootstrap,
             "network-recon-runner": self._run_network_recon_runner,
             "web-scan-runner": self._run_web_scan_runner,
             "service-audit-runner": self._run_service_audit_runner,
@@ -280,6 +294,57 @@ class ToolRuntimeService:
 
     def has_handler(self, tool_key: str) -> bool:
         return tool_key in self._handlers
+
+    def prepare_security_tool_bootstrap_arguments(
+        self,
+        *,
+        campaign_id: str,
+        target_allowlist: list[str],
+        profile_key: str,
+        tool_name: str,
+        requested_version: str = "",
+        timeout_seconds: float | None = None,
+    ) -> tuple[dict[str, Any] | None, str]:
+        """Build P4's server-owned approval payload without executing it."""
+        if not self._security_tool_bootstrap_service.is_enabled():
+            return None, "bootstrap_disabled"
+        plan = self._security_tool_bootstrap_service.resolve_plan(
+            profile_key=profile_key,
+            tool_name=tool_name,
+        )
+        if plan is None:
+            return None, "package_not_allowlisted"
+        return (
+            self._security_tool_bootstrap_service.build_approval_arguments(
+                campaign_id=campaign_id,
+                target_allowlist=target_allowlist,
+                profile_key=profile_key,
+                plan=plan,
+                requested_version=requested_version,
+                timeout_seconds=float(timeout_seconds or 300),
+            ),
+            "",
+        )
+
+    def record_security_tool_bootstrap_campaign(
+        self,
+        *,
+        campaign_id: str,
+        target_allowlist: list[str],
+        manifest: dict[str, Any],
+        tool_summary: str,
+        tool_status: str,
+        context: ToolExecutionContext,
+    ):
+        """Project a completed dedicated P4 lifecycle into its security Campaign."""
+        return self._security_testing_mode_runtime.record_external_tool_bootstrap(
+            campaign_id=campaign_id,
+            target_allowlist=target_allowlist,
+            manifest=manifest,
+            tool_summary=tool_summary,
+            tool_status=tool_status,
+            context=context,
+        )
 
     async def execute(
         self,
@@ -372,6 +437,7 @@ class ToolRuntimeService:
                         summary=summary,
                         error_message=str(result.get("error") or summary),
                         output_payload=result,
+                        artifacts=result.get("artifacts", []) if isinstance(result, dict) else [],
                     )
                 elif resolved_status == "partial":
                     await self._tool_job_service.mark_partial(
@@ -402,29 +468,26 @@ class ToolRuntimeService:
             record_output = self._compact_tool_output_for_model(tool.key, result)
             # Inject download URLs for saved artifacts so the LLM can reference
             # them in its response as clickable markdown links.
-            if job is not None and self._tool_job_service is not None and resolved_status == "completed":
+            if job is not None and self._tool_job_service is not None and resolved_status in {
+                "completed",
+                "partial",
+                "failed",
+            }:
                 saved_artifacts = await self._tool_job_service.list_artifacts(tool_job_id=job.id)
-                if saved_artifacts:
-                    download_urls = []
-                    for artifact in saved_artifacts:
-                        url = f"/api/v1/sessions/{context.session_id}/artifacts/{artifact.id}/content"
-                        download_urls.append({
-                            "artifact_id": artifact.id,
-                            "label": artifact.label or artifact.path,
-                            "artifact_type": artifact.artifact_type,
-                            "url": url,
-                        })
-                    if download_urls:
-                        record_output["download_urls"] = download_urls
-                        # Provide a pre-formatted markdown link string so the LLM
-                        # can copy it verbatim instead of inventing its own format.
-                        # This dramatically increases the chance the frontend renders
-                        # a clickable download button.
-                        md_links = [
-                            f"[点击下载 {du['label']}]({du['url']})"
-                            for du in download_urls
-                        ]
-                        record_output["download_markdown"] = "\n".join(md_links)
+                downloads = [
+                    {
+                        "artifact_id": artifact.id,
+                        "label": artifact.label or artifact.path,
+                        "artifact_type": artifact.artifact_type,
+                        "url": f"/api/v1/sessions/{context.session_id}/artifacts/{artifact.id}/content",
+                    }
+                    for artifact in saved_artifacts
+                ]
+                if downloads:
+                    record_output["download_urls"] = downloads
+                    record_output["download_markdown"] = "\n".join(
+                        f"[点击下载 {item['label']}]({item['url']})" for item in downloads
+                    )
             return ToolExecutionRecord(
                 call_id=call.id,
                 tool_key=tool.key,
@@ -463,6 +526,8 @@ class ToolRuntimeService:
 
     def _resolve_result_status(self, result: dict[str, Any]) -> str:
         explicit_status = str(result.get("status") or "").strip().lower()
+        if explicit_status == "interrupted":
+            return "partial"
         if explicit_status in {"completed", "partial", "failed", "waiting_approval", "denied"}:
             return explicit_status
         if result.get("ok") is False:
@@ -565,6 +630,201 @@ class ToolRuntimeService:
             "chunks": selected,
             "query": query,
         }
+
+    async def _run_web_search(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> dict[str, Any]:
+        query = str(arguments.get("query") or context.normalized_input or context.user_message or "").strip()
+        limit = _clamp_int(arguments.get("limit"), default=5, minimum=1, maximum=10)
+        time_range = str(arguments.get("time_range") or "").strip()
+        if not query:
+            return {
+                "status": "failed",
+                "ok": False,
+                "summary": "Web Search requires a non-empty query.",
+                "error": "missing_query",
+                "provider": "anysearch",
+                "results": [],
+            }
+
+        payload: dict[str, Any] = {
+            "query": query,
+            "limit": limit,
+        }
+        if time_range:
+            payload["time_range"] = time_range
+        settings = self._settings or Settings()
+        api_key = settings.anysearch_api_key.strip()
+        if not api_key:
+            return {
+                "status": "failed",
+                "ok": False,
+                "summary": "AnySearch API key is not configured.",
+                "error": "missing_anysearch_api_key",
+                "provider": "anysearch",
+                "query": query,
+                "results": [],
+            }
+
+        try:
+            async with httpx.AsyncClient(
+                base_url=settings.anysearch_api_base_url.strip() or "https://api.anysearch.com",
+                timeout=min(max(self._request_timeout_seconds, 5), 30),
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                    "Accept": "application/json",
+                    "User-Agent": "Enterprise-AI-QA-Agent/1.0",
+                },
+            ) as client:
+                response = await client.post("/v1/search", json=payload)
+        except httpx.TimeoutException:
+            return {
+                "status": "failed",
+                "ok": False,
+                "summary": "AnySearch request timed out.",
+                "error": "anysearch_timeout",
+                "provider": "anysearch",
+                "query": query,
+                "results": [],
+            }
+        except httpx.HTTPError as exc:
+            return {
+                "status": "failed",
+                "ok": False,
+                "summary": f"AnySearch request failed: {exc.__class__.__name__}.",
+                "error": "anysearch_request_failed",
+                "provider": "anysearch",
+                "query": query,
+                "results": [],
+            }
+
+        request_id = response.headers.get("x-request-id", "")
+        try:
+            response_payload = response.json()
+        except ValueError:
+            response_payload = {"message": response.text[:500]}
+
+        if response.status_code >= 400:
+            error_message = self._extract_anysearch_error(response_payload) or f"HTTP {response.status_code}"
+            if isinstance(response_payload, dict):
+                request_id = request_id or str(response_payload.get("request_id") or "")
+            return {
+                "status": "failed",
+                "ok": False,
+                "summary": f"AnySearch returned an error: {error_message}.",
+                "error": "anysearch_http_error",
+                "provider": "anysearch",
+                "query": query,
+                "status_code": response.status_code,
+                "request_id": request_id,
+                "results": [],
+            }
+
+        results = self._normalize_anysearch_results(response_payload, limit=limit)
+        answer = self._extract_anysearch_answer(response_payload)
+        return {
+            "status": "completed",
+            "ok": True,
+            "summary": f"AnySearch returned {len(results)} result(s) for query '{query}'.",
+            "provider": "anysearch",
+            "query": query,
+            "answer": answer,
+            "results": results,
+            "request_id": request_id,
+            "metrics": {
+                "returned_count": len(results),
+            },
+        }
+
+    def _normalize_anysearch_results(self, payload: Any, *, limit: int) -> list[dict[str, Any]]:
+        candidates = self._extract_anysearch_result_candidates(payload)
+        results: list[dict[str, Any]] = []
+        for item in candidates:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or item.get("name") or item.get("headline") or "").strip()
+            url = str(
+                item.get("url")
+                or item.get("link")
+                or item.get("href")
+                or item.get("source_url")
+                or ""
+            ).strip()
+            snippet = str(
+                item.get("snippet")
+                or item.get("description")
+                or item.get("summary")
+                or item.get("content")
+                or item.get("text")
+                or ""
+            ).strip()
+            if not title and url:
+                title = url
+            if not title and not snippet:
+                continue
+            results.append(
+                {
+                    "title": title,
+                    "url": url,
+                    "snippet": snippet,
+                    "source": str(item.get("source") or item.get("site") or item.get("domain") or "").strip(),
+                    "published_at": str(
+                        item.get("published_at")
+                        or item.get("publishedAt")
+                        or item.get("date")
+                        or ""
+                    ).strip(),
+                }
+            )
+            if len(results) >= limit:
+                break
+        return results
+
+    def _extract_anysearch_result_candidates(self, payload: Any) -> list[Any]:
+        if isinstance(payload, list):
+            return payload
+        if not isinstance(payload, dict):
+            return []
+        for key in ("results", "items", "organic_results", "web", "documents"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+        data = payload.get("data")
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict):
+            for key in ("results", "items", "organic_results", "web", "documents"):
+                value = data.get(key)
+                if isinstance(value, list):
+                    return value
+        return []
+
+    def _extract_anysearch_answer(self, payload: Any) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        for key in ("answer", "summary", "response", "text"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        data = payload.get("data")
+        if isinstance(data, dict):
+            for key in ("answer", "summary", "response", "text"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ""
+
+    def _extract_anysearch_error(self, payload: Any) -> str:
+        if not isinstance(payload, dict):
+            return ""
+        for key in ("message", "error", "detail"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
 
     async def _run_api_docs_library(
         self,
@@ -780,6 +1040,84 @@ class ToolRuntimeService:
                 "requirement_count": len(requirements),
                 "acceptance_criteria_count": len(acceptance_criteria),
             },
+        }
+
+    async def _run_test_case_xlsx_exporter(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> dict[str, Any]:
+        cases = arguments.get("cases") or []
+        feature = str(arguments.get("feature") or "test_cases").strip()
+        if not cases:
+            return {
+                "status": "failed",
+                "ok": False,
+                "summary": "No test cases provided for xlsx export.",
+                "artifacts": [],
+                "metrics": {"case_count": 0},
+                "error": "missing_cases",
+            }
+
+        from openpyxl import Workbook
+        from openpyxl.styles import Alignment, Font, PatternFill
+
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "Test Cases"
+        headers = [
+            "ID", "Title", "Type", "Priority", "Platforms",
+            "Preconditions", "Steps", "Expected Results", "Assertions", "Risk Focus",
+        ]
+        header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
+        header_font = Font(bold=True, color="FFFFFF")
+        for column, header in enumerate(headers, start=1):
+            cell = worksheet.cell(row=1, column=column, value=header)
+            cell.fill = header_fill
+            cell.font = header_font
+            cell.alignment = Alignment(horizontal="center")
+
+        for case in cases:
+            if not isinstance(case, dict):
+                continue
+            steps = case.get("steps") if isinstance(case.get("steps"), list) else []
+            worksheet.append([
+                case.get("id", ""),
+                case.get("title", ""),
+                case.get("type", ""),
+                case.get("priority", ""),
+                ", ".join(_to_string_list(case.get("platforms"))),
+                "\n".join(_to_string_list(case.get("preconditions"))),
+                "\n".join(
+                    f"{step.get('step', index)}. {step.get('action', '')}"
+                    for index, step in enumerate(steps, start=1)
+                    if isinstance(step, dict)
+                ),
+                "\n".join(
+                    str(step.get("expected") or "")
+                    for step in steps
+                    if isinstance(step, dict) and step.get("expected")
+                ),
+                "\n".join(_to_string_list(case.get("assertions"))),
+                ", ".join(_to_string_list(case.get("risk_focus"))),
+            ])
+
+        for column_cells in worksheet.columns:
+            max_length = max(len(str(cell.value or "")) for cell in column_cells)
+            worksheet.column_dimensions[column_cells[0].column_letter].width = min(max_length + 2, 50)
+
+        artifact_dir = self._prepare_local_artifact_dir(context, "test-case-xlsx-exporter")
+        safe_feature = _slug(feature)[:60] or "test_cases"
+        xlsx_path = artifact_dir / f"{safe_feature}_test_cases.xlsx"
+        workbook.save(xlsx_path)
+        return {
+            "status": "completed",
+            "ok": True,
+            "summary": f"Exported {len(cases)} test cases to '{xlsx_path.name}'.",
+            "artifact_path": str(xlsx_path),
+            "case_count": len(cases),
+            "artifacts": [{"type": "test_cases_xlsx", "label": xlsx_path.name, "path": str(xlsx_path)}],
+            "metrics": {"case_count": len(cases)},
         }
 
     async def _run_attachment_reader(
@@ -2206,6 +2544,189 @@ class ToolRuntimeService:
             return await self._security_testing_mode_runtime.handle(arguments, context)
         return await self._execute_security_runner(arguments, context, "security-scan-runner")
 
+    async def _run_security_tool_bootstrap(
+        self,
+        arguments: dict[str, Any],
+        context: ToolExecutionContext,
+    ) -> dict[str, Any]:
+        profile_key = str(arguments.get("profile_key") or "").strip()
+        tool_name = str(arguments.get("tool_name") or "").strip()
+        campaign_id = str(arguments.get("campaign_id") or "").strip()
+        target_allowlist = [
+            str(item).strip()
+            for item in (arguments.get("target_allowlist") or [])
+            if str(item).strip()
+        ]
+        plan = self._security_tool_bootstrap_service.resolve_plan(
+            profile_key=profile_key,
+            tool_name=tool_name,
+        )
+        if plan is None:
+            return {
+                "status": "denied",
+                "ok": False,
+                "summary": "Requested P4 tool/profile combination is not allowlisted.",
+                "error": "package_not_allowlisted",
+            }
+        artifact_dir = self._prepare_local_artifact_dir(context, "security-tool-bootstrap")
+        manifest = await self._security_tool_bootstrap_service.run(
+            campaign_id=campaign_id,
+            target_allowlist=target_allowlist,
+            profile_key=profile_key,
+            tool_name=tool_name,
+            requested_version=str(arguments.get("requested_version") or "").strip(),
+            approval_scope_hash=str(arguments.get("_p4_approval_scope_hash") or "").strip(),
+            approval_granted=bool(arguments.get("_server_approval_granted")),
+            artifact_dir=artifact_dir,
+            timeout_seconds=arguments.get("timeout_seconds"),
+        )
+        payload = manifest.to_dict()
+        success = manifest.status in {"already_available", "completed"}
+        result = {
+            "status": "completed" if success else "waiting_approval" if manifest.status == "waiting_approval" else "failed",
+            "ok": success,
+            "summary": (
+                f"P4 tool {manifest.tool_name} is {manifest.status}."
+                if success
+                else manifest.failure_reason or f"P4 tool bootstrap {manifest.status}."
+            ),
+            "error": None if success else manifest.failure_category,
+            "tool_bootstrap": payload,
+            "artifacts": [
+                {
+                    "type": "security_tool_bootstrap_manifest",
+                    "path": manifest.manifest_path,
+                }
+            ],
+        }
+        await self._promote_security_bootstrap_manifest_uri(
+            result=result,
+            manifest=manifest,
+            context=context,
+        )
+        campaign_state = self.record_security_tool_bootstrap_campaign(
+            campaign_id=campaign_id,
+            target_allowlist=target_allowlist,
+            manifest=payload,
+            tool_summary=str(result.get("summary") or ""),
+            tool_status=str(result.get("status") or ""),
+            context=context,
+        )
+        report = campaign_state.report
+        settlement = (
+            campaign_state.campaign.settlement
+            if campaign_state.campaign is not None
+            else None
+        )
+        if report is not None:
+            result["campaign_id"] = campaign_state.campaign.campaign_id if campaign_state.campaign else campaign_id
+            result["report"] = report.model_dump(mode="json")
+            result["report_markdown"] = campaign_state.report_markdown
+            result["report_html"] = campaign_state.report_html
+            result["verification_result"] = dict(campaign_state.verification_result)
+            result["evaluation_result"] = dict(campaign_state.evaluation_result)
+            result["settlement"] = settlement.model_dump(mode="json") if settlement is not None else {}
+            result["security_campaign_projection"] = {
+                "campaign_id": result["campaign_id"],
+                "bootstrap_id": str(payload.get("bootstrap_id") or ""),
+                "settlement_status": settlement.status if settlement is not None else "failed",
+                "cleanup_complete": bool(settlement.cleanup_complete) if settlement is not None else False,
+            }
+            result["artifacts"] = self._merge_security_bootstrap_artifacts(
+                list(result.get("artifacts") or []),
+                list(campaign_state.artifacts or []),
+            )
+        return result
+
+    @staticmethod
+    def _merge_security_bootstrap_artifacts(
+        bootstrap_artifacts: list[dict[str, Any]],
+        report_artifacts: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Preserve manifest and report artifact payloads for one ToolJob upload."""
+        merged: list[dict[str, Any]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for item in [*bootstrap_artifacts, *report_artifacts]:
+            if not isinstance(item, dict):
+                continue
+            artifact = dict(item)
+            identity = (
+                str(artifact.get("type") or ""),
+                str(artifact.get("filename") or ""),
+                str(artifact.get("path") or ""),
+            )
+            if identity in seen:
+                continue
+            seen.add(identity)
+            merged.append(artifact)
+        return merged
+
+    async def _promote_security_bootstrap_manifest_uri(
+        self,
+        *,
+        result: dict[str, Any],
+        manifest: Any,
+        context: ToolExecutionContext,
+    ) -> None:
+        """Persist the P4 manifest first, then keep every audit reference durable.
+
+        Artifact storage may remove local files after upload. P4's manifest
+        payload must therefore be updated to the durable URI rather than
+        retaining a stale local filesystem path in reports or later campaign
+        state.
+        """
+        if self._artifact_storage_service is None:
+            return
+        local_path = str(manifest.manifest_path or "").strip()
+        if not local_path:
+            return
+        stored = await self._artifact_storage_service.store_output_artifacts(
+            {
+                "artifacts": [
+                    {
+                        "type": "security_tool_bootstrap_manifest",
+                        "path": local_path,
+                    }
+                ]
+            },
+            session_id=context.session_id,
+            turn_id=context.turn_id,
+            tool_key="security-tool-bootstrap",
+        )
+        artifacts = stored.get("artifacts") if isinstance(stored, dict) else []
+        durable = artifacts[0] if isinstance(artifacts, list) and artifacts else {}
+        durable_path = str(durable.get("path") or "").strip() if isinstance(durable, dict) else ""
+        if not durable_path:
+            return
+        manifest.manifest_path = durable_path
+        local_manifest_path = Path(local_path)
+        local_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        local_manifest_path.write_text(
+            json.dumps(manifest.to_dict(), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        refreshed = await self._artifact_storage_service.store_output_artifacts(
+            {
+                "artifacts": [
+                    {
+                        "type": "security_tool_bootstrap_manifest",
+                        "path": local_path,
+                    }
+                ]
+            },
+            session_id=context.session_id,
+            turn_id=context.turn_id,
+            tool_key="security-tool-bootstrap",
+        )
+        payload = result.get("tool_bootstrap")
+        if isinstance(payload, dict):
+            payload["manifest_path"] = durable_path
+        result["artifacts"] = (
+            refreshed.get("artifacts")
+            if isinstance(refreshed, dict) and isinstance(refreshed.get("artifacts"), list)
+            else artifacts
+        )
+
     async def _run_network_recon_runner(
         self,
         arguments: dict[str, Any],
@@ -2239,28 +2760,14 @@ class ToolRuntimeService:
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> dict[str, Any]:
-        return {
-            "status": "denied",
-            "ok": False,
-            "success": False,
-            "summary": "Traffic analysis runner is reserved for a later security testing phase.",
-            "runner_key": "traffic-analysis-runner",
-            "error": "runner_not_enabled",
-        }
+        return await self._execute_security_runner(arguments, context, "traffic-analysis-runner")
 
     async def _run_exploit_workbench_runner(
         self,
         arguments: dict[str, Any],
         context: ToolExecutionContext,
     ) -> dict[str, Any]:
-        return {
-            "status": "denied",
-            "ok": False,
-            "success": False,
-            "summary": "Exploit workbench runner is reserved for approved Phase 3/4 workflows.",
-            "runner_key": "exploit-workbench-runner",
-            "error": "runner_not_enabled",
-        }
+        return await self._execute_security_runner(arguments, context, "exploit-workbench-runner")
 
     def _is_security_campaign_request(self, arguments: dict[str, Any]) -> bool:
         worker_action = str(arguments.get("worker_action") or "").strip().lower()
@@ -2280,7 +2787,7 @@ class ToolRuntimeService:
     ) -> dict[str, Any]:
         from src.application.security.finding_normalizer import FindingNormalizer
         from src.application.security.execution_monitor import SecurityExecutionMonitor
-        from src.application.security.result_parsers import get_parser_registry
+        from src.application.security.result_parsers import evaluate_parser_success, get_parser_registry
         from src.application.security.risk_policy import SecurityRiskPolicy
         from src.application.security.tool_catalog import SecurityToolCatalog
 
@@ -2355,13 +2862,7 @@ class ToolRuntimeService:
                 "error": "profile_blocked_in_environment",
             }
 
-        approval_granted = bool(
-            arguments.get("approved")
-            or arguments.get("approval_granted")
-            or arguments.get("authorization_confirmed")
-        )
-        if task is not None and not approval_granted:
-            approval_granted = bool(getattr(task, "approval_granted", False))
+        approval_granted = bool(arguments.get("_server_approval_granted"))
         if risk_policy.requires_approval(profile.profile_key) and not approval_granted:
             return {
                 "status": "waiting_approval",
@@ -2405,6 +2906,32 @@ class ToolRuntimeService:
                 "error": "missing_profile_arguments",
             }
 
+        if profile.profile_key == "free_command":
+            if not self._security_free_command_enabled():
+                return {
+                    "status": "denied",
+                    "ok": False,
+                    "success": False,
+                    "summary": "Controlled free commands are disabled by server configuration.",
+                    "runner_key": runner_key,
+                    "command_profile": profile.profile_key,
+                    "error": "free_command_disabled",
+                }
+            free_command_error = self._validate_free_security_command(
+                str(render_args.get("command") or ""),
+                str(render_args.get("target") or ""),
+            )
+            if free_command_error:
+                return {
+                    "status": "denied",
+                    "ok": False,
+                    "success": False,
+                    "summary": free_command_error,
+                    "runner_key": runner_key,
+                    "command_profile": profile.profile_key,
+                    "error": "free_command_rejected",
+                }
+
         preflight_error = self._security_profile_preflight(profile.profile_key, render_args)
         if preflight_error:
             return {
@@ -2432,13 +2959,14 @@ class ToolRuntimeService:
             }
 
         executable = command_args[0]
-        timeout_seconds = float(
-            arguments.get("timeout_seconds")
-            or (task.timeout_seconds if task is not None else 0)
-            or profile.timeout_seconds
-            or 120
-        )
-        timeout_seconds = max(1.0, min(timeout_seconds, 1800.0))
+        bootstrap_applied = False
+        if self._security_tool_bootstrap_enabled() and profile.profile_key != "free_command":
+            bootstrap = self._security_bootstrap_command(profile.tool_name, command, command_args)
+            if bootstrap:
+                command = bootstrap
+                command_args = ["sh", "-lc", bootstrap]
+                bootstrap_applied = True
+        timeout_seconds = self._resolve_security_timeout_seconds(arguments, task, profile)
         try:
             execution_result = await self._security_execution_environment.execute(
                 command=command,
@@ -2488,7 +3016,12 @@ class ToolRuntimeService:
                 task.task_id if task is not None else "",
             )
         ]
-        success = exit_code == 0 and not timed_out
+        success, semantic_error = evaluate_parser_success(
+            profile.parser_key,
+            parsed_result,
+            exit_code=exit_code,
+            timed_out=timed_out,
+        )
         transcript = {
             "runner_key": runner_key,
             "profile_key": profile.profile_key,
@@ -2502,6 +3035,7 @@ class ToolRuntimeService:
             "duration_seconds": max(0.0, (execution_result.completed_at - execution_result.started_at).total_seconds()),
             "exit_code": exit_code,
             "timed_out": timed_out,
+            "bootstrap_applied": bootstrap_applied,
             "stdout": stdout_text[-20000:],
             "stderr": stderr_text[-12000:],
         }
@@ -2540,8 +3074,13 @@ class ToolRuntimeService:
                 "stdout_chars": len(stdout_text),
                 "stderr_chars": len(stderr_text),
                 "duration_seconds": transcript["duration_seconds"],
+                "bootstrap_applied": bootstrap_applied,
             },
-            "error": None if success else ("timeout" if timed_out else stderr_text[-500:] or f"exit_code={exit_code}"),
+            "error": None if success else (
+                semantic_error
+                or ("timeout" if timed_out else stderr_text[-500:] or f"exit_code={exit_code}")
+            ),
+            "semantic_success": success,
         }
 
     def _security_task_from_arguments(self, arguments: dict[str, Any]):
@@ -2595,8 +3134,32 @@ class ToolRuntimeService:
             return "sslscan_tls_audit"
         if runner_key == "credential-attack-runner":
             return "hydra_basic_login"
+        if runner_key == "traffic-analysis-runner":
+            return "tcpdump_timed_capture"
+        if runner_key == "exploit-workbench-runner":
+            return "searchsploit_exploit_lookup"
         target = str(arguments.get("target") or "").strip()
         return "httpx_probe" if target.startswith(("http://", "https://")) else "nmap_tcp_basic"
+
+    def _resolve_security_timeout_seconds(
+        self,
+        arguments: dict[str, Any],
+        task: Any,
+        profile: Any,
+    ) -> float:
+        assigned = float(
+            (task.timeout_seconds if task is not None else 0)
+            or profile.timeout_seconds
+            or 120
+        )
+        requested_raw = arguments.get("timeout_seconds")
+        try:
+            requested = float(requested_raw) if requested_raw not in (None, "") else assigned
+        except (TypeError, ValueError):
+            requested = assigned
+        # A worker may shorten its own command budget, but it cannot expand a
+        # server-assigned task/profile timeout by supplying a larger argument.
+        return max(1.0, min(requested, assigned, 1800.0))
 
     def _security_profile_matches_runner(self, tool_family: str, runner_key: str) -> bool:
         if runner_key == "security-scan-runner":
@@ -2629,6 +3192,10 @@ class ToolRuntimeService:
             "service",
             "userlist",
             "passlist",
+            "duration_seconds",
+            "packet_count",
+            "module_name",
+            "command",
         ):
             if arguments.get(key) not in (None, ""):
                 supplied[key] = arguments.get(key)
@@ -2636,7 +3203,7 @@ class ToolRuntimeService:
             supplied.setdefault("target", task.target)
             if task.target_port:
                 supplied.setdefault("ports", str(task.target_port))
-        if profile.profile_key == "searchsploit_lookup":
+        if profile.profile_key in {"searchsploit_lookup", "searchsploit_exploit_lookup"}:
             supplied.setdefault("query", supplied.get("target") or "")
         # Tools like sslscan only accept ``host[:port]`` targets, not full
         # URLs. Normalize before rendering so a target like
@@ -2656,6 +3223,8 @@ class ToolRuntimeService:
         supplied.setdefault("hydra_output", self._security_output_path(output_root, "hydra_result.txt"))
         supplied.setdefault("sqlmap_output_dir", self._security_output_path(output_root, "sqlmap_out"))
         supplied.setdefault("ports", "1-1000")
+        supplied.setdefault("duration_seconds", "30")
+        supplied.setdefault("packet_count", "100")
 
         render_args: dict[str, Any] = {}
         missing: list[str] = []
@@ -2664,8 +3233,73 @@ class ToolRuntimeService:
             if value in (None, ""):
                 missing.append(key)
                 continue
-            render_args[key] = self._sanitize_security_argument(str(value), allow_spaces=key == "query")
+            if profile.profile_key == "free_command" and key == "command":
+                render_args[key] = str(value).replace("\r", "").replace("\n", "").strip()
+            else:
+                render_args[key] = self._sanitize_security_argument(str(value), allow_spaces=key == "query")
         return render_args, missing
+
+    def _security_free_command_enabled(self) -> bool:
+        value = getattr(self._settings, "security_runner_allow_free_command", False) if self._settings else False
+        return bool(value)
+
+    def _security_tool_bootstrap_enabled(self) -> bool:
+        value = getattr(self._settings, "security_runner_tool_bootstrap", False) if self._settings else False
+        return bool(value) and self._security_runner_backend() in {"docker", "container"}
+
+    def _security_bootstrap_command(
+        self,
+        tool_name: str,
+        command: str,
+        command_args: list[str],
+    ) -> str:
+        package_by_tool = {
+            "tcpdump": "tcpdump",
+            "searchsploit": "exploitdb",
+            "msfconsole": "metasploit-framework",
+        }
+        package = package_by_tool.get(str(tool_name or "").strip())
+        if not package:
+            return ""
+        executable = shlex.quote(str(tool_name).strip())
+        package_name = shlex.quote(package)
+        rendered = command if command.strip() else shlex.join(command_args)
+        return (
+            f"if ! command -v {executable} >/dev/null 2>&1; then "
+            f"apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y {package_name}; "
+            f"fi; exec {rendered}"
+        )
+
+    def _validate_free_security_command(self, command: str, target: str) -> str:
+        normalized = str(command or "").strip()
+        explicit_target = str(target or "").strip().strip("'\"")
+        if not normalized or len(normalized) > 4096:
+            return "Controlled free command must contain between 1 and 4096 characters."
+        if not explicit_target:
+            return "Controlled free command requires an explicit target for allowlist enforcement."
+        try:
+            argv = self._split_security_command(normalized)
+        except ValueError:
+            return "Controlled free command could not be parsed safely."
+        allowed_executables = {
+            "nmap", "httpx", "whatweb", "nuclei", "sslscan", "searchsploit",
+            "tcpdump", "curl", "wget", "python3",
+        }
+        executable = Path(argv[0]).name.lower() if argv else ""
+        if executable not in allowed_executables:
+            return f"Executable '{executable or 'unknown'}' is not allowed for controlled free commands."
+        target_host = self._normalize_tls_target(explicit_target).split(":", 1)[0]
+        if explicit_target not in normalized and target_host not in normalized:
+            return "Controlled free command must reference its explicit authorized target."
+        denied_fragments = (
+            "rm -rf", "mkfs", "shutdown", "reboot", "poweroff", "dd if=",
+            ">/dev/", "docker.sock", "--privileged", "curl | sh", "wget | sh",
+        )
+        lowered = normalized.lower().replace(" ", "")
+        for fragment in denied_fragments:
+            if fragment.replace(" ", "") in lowered:
+                return f"Controlled free command contains denied destructive pattern '{fragment}'."
+        return ""
 
     @staticmethod
     def _normalize_tls_target(target: str) -> str:

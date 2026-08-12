@@ -4,6 +4,7 @@ import ipaddress
 from typing import Any
 from urllib.parse import urlparse
 
+from src.application.security.command_profiles import SecurityCommandProfileRegistry
 from src.schemas.agent import ToolDescriptor
 from src.schemas.intent import ToolSafetyDecision
 
@@ -21,6 +22,9 @@ class ExecutionSafetyPolicy:
         "communication",
         "review",
     }
+
+    def __init__(self) -> None:
+        self._security_profiles = SecurityCommandProfileRegistry()
 
     def evaluate_tool_call(
         self,
@@ -60,6 +64,40 @@ class ExecutionSafetyPolicy:
                 reason="Verified target authorization is required before active security tooling can run.",
                 reason_code="security_authorization_required",
             )
+        verified_low_risk_security_profile = False
+        if active_mode_key == "security_testing" and tool.owner_mode_key == "security_testing":
+            if tool.key == "security-tool-bootstrap":
+                return ToolSafetyDecision(
+                    behavior="ask",
+                    reason=(
+                        "P4 temporary security-tool readiness requires a dedicated approval "
+                        "for its exact campaign, package, image, repository and target scope."
+                    ),
+                    reason_code="security_tool_bootstrap_approval_required",
+                )
+            task = arguments.get("task")
+            task_data = task if isinstance(task, dict) else {}
+            profile_key = str(
+                arguments.get("command_profile")
+                or task_data.get("command_profile")
+                or ""
+            ).strip()
+            profile = self._security_profiles.get(profile_key)
+            requires_profile_approval = (
+                profile is None
+                or profile.requires_approval
+                or profile.risk_level in {"high", "critical"}
+            )
+            if bool(task_data.get("requires_approval")) or requires_profile_approval:
+                return ToolSafetyDecision(
+                    behavior="ask",
+                    reason=(
+                        "The registered security command profile is high risk, unknown, "
+                        "or explicitly requires approval."
+                    ),
+                    reason_code="security_task_risk_approval_required",
+                )
+            verified_low_risk_security_profile = safety.get("authorization_status") == "verified"
         environments = {
             str(value).strip().lower()
             for value in (
@@ -76,7 +114,11 @@ class ExecutionSafetyPolicy:
                 reason="Performance load execution is blocked in production by default.",
                 reason_code="production_high_load_denied",
             )
-        if safety_decision == "require_confirmation" and tool.category in self.EXECUTION_CATEGORIES:
+        if (
+            safety_decision == "require_confirmation"
+            and tool.category in self.EXECUTION_CATEGORIES
+            and not verified_low_risk_security_profile
+        ):
             return ToolSafetyDecision(
                 behavior="ask",
                 reason="This request has side effects and requires approval for the concrete tool arguments.",
@@ -124,6 +166,7 @@ class ExecutionSafetyPolicy:
         resource_scope = context.get("trusted_resource_scope")
         if isinstance(resource_scope, dict):
             candidates.append(resource_scope.get("project_url"))
+            candidates.extend(resource_scope.get("allowed_targets") or [])
         safety = context.get("safety_assessment")
         intent = context.get("intent_decision")
         if (

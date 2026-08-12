@@ -1472,4 +1472,9 @@ export default {
   "sessionHistory.toggle_panel": "切换会话列表面板",
   "sessionHistory.switching": "正在切换会话...",
   "sessionHistory.creating": "正在创建新会话...",
+  "sessionHistory.delete": "删除",
+  "sessionHistory.delete_confirm": "确定要删除此会话吗？删除后无法恢复。",
+  "sessionHistory.delete_success": "会话已删除",
+  "sessionHistory.delete_failed": "删除会话失败",
+  "sessionHistory.cannot_delete_running": "运行中的会话无法删除",
 } as Record<string, string>;

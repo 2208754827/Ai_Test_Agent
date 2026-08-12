@@ -141,10 +141,16 @@ class SafetyIntentService:
         allowed_targets = [str(item).strip().lower() for item in grant.get("targets", []) if str(item).strip()]
         if not allowed_targets or not target_url:
             return False
-        target_host = (urlparse(target_url).hostname or "").lower()
+        parsed_target = urlparse(target_url)
+        target_host = (parsed_target.hostname or "").lower()
+        target_port = parsed_target.port
         for allowed in allowed_targets:
-            allowed_host = (urlparse(allowed).hostname or allowed.split(":", 1)[0]).strip("[]").lower()
-            if target_host and target_host == allowed_host:
+            parsed_allowed = urlparse(allowed)
+            allowed_host = (parsed_allowed.hostname or allowed.split(":", 1)[0]).strip("[]").lower()
+            allowed_port = parsed_allowed.port
+            if target_host and target_host == allowed_host and (
+                allowed_port is None or allowed_port == target_port
+            ):
                 return True
         return False
 

@@ -55,6 +55,58 @@ class CoordinatorRuntimeService:
         self._watch_tasks: dict[str, asyncio.Task[None]] = {}
         self._max_consecutive_failures = 3
 
+    async def cancel_workers(
+        self,
+        *,
+        task_ids: list[str],
+        child_session_ids: list[str],
+        reason: str,
+    ) -> None:
+        """Cancel coordinator-owned coroutines and settle their child sessions."""
+        tasks = [
+            task
+            for task_id in task_ids
+            for task in [self._active_tasks.pop(task_id, None)]
+            if task is not None
+        ]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        for child_session_id in child_session_ids:
+            session = await self._store.get_session(child_session_id)
+            if session is None or session.status in {
+                SessionStatus.completed,
+                SessionStatus.failed,
+                SessionStatus.interrupted,
+            }:
+                continue
+            session.status = SessionStatus.interrupted
+            session.updated_at = datetime.utcnow()
+            control = dict(session.metadata.get("control") or {})
+            control.update(
+                {
+                    "control_state": "interrupted",
+                    "is_interrupted": True,
+                    "is_resumable": False,
+                    "preserve_resources": False,
+                    "last_interrupt_reason": reason,
+                    "last_control_source": "security_coordinator",
+                }
+            )
+            session.metadata["control"] = control
+            await self._store.save_session(session)
+            await self._store.append_event(
+                child_session_id,
+                ExecutionEvent(
+                    type="worker.interrupted",
+                    session_id=child_session_id,
+                    timestamp=datetime.utcnow(),
+                    payload={"reason": reason, "source": "security_coordinator"},
+                ),
+            )
+
     async def dispatch(
         self,
         payload: dict[str, Any],
@@ -132,6 +184,7 @@ class CoordinatorRuntimeService:
                         "worker_description": worker.description,
                         "dispatch_role": dispatch_role,
                         "notification_mode": "task-notification",
+                        **self._trusted_worker_metadata(parent_session, mode_key),
                         **({"allowed_tool_keys": worker.allowed_tool_keys} if worker.allowed_tool_keys else {}),
                     },
                     inherited_context=parent_inherited_context,
@@ -231,6 +284,30 @@ class CoordinatorRuntimeService:
             },
             "error": "; ".join(immediate_failure_errors) or None,
         }
+
+    def _trusted_worker_metadata(self, parent_session: Any, mode_key: str) -> dict[str, Any]:
+        """Propagate server-trusted security scope into security child sessions.
+
+        Worker prompts are active security requests, so their safety assessment
+        must validate the same verified grant as the parent campaign. Only
+        server-persisted parent metadata is copied; arbitrary worker context is
+        deliberately excluded. The child still passes normal permission and
+        approval policy evaluation for its assigned runner.
+        """
+        if str(mode_key or "").strip() != "security_testing":
+            return {}
+        parent_metadata = parent_session.metadata if isinstance(parent_session.metadata, dict) else {}
+        grant = parent_metadata.get("security_authorization")
+        if not isinstance(grant, dict) or str(grant.get("status") or "").lower() != "verified":
+            return {}
+        trusted: dict[str, Any] = {"security_authorization": dict(grant)}
+        resource_scope = parent_metadata.get("resource_scope")
+        if isinstance(resource_scope, dict):
+            trusted["resource_scope"] = dict(resource_scope)
+        environment = str(parent_metadata.get("environment") or "").strip()
+        if environment:
+            trusted["environment"] = environment
+        return trusted
 
     async def _run_child_session(
         self,

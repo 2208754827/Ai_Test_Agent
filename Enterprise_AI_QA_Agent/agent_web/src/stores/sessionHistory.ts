@@ -2,6 +2,7 @@ import { defineStore } from "pinia";
 
 import { api } from "../services/api";
 import type { SessionSummary } from "../types";
+import { useSessionStore } from "./session";
 
 export const useSessionHistoryStore = defineStore("sessionHistory", {
   state: () => ({
@@ -44,6 +45,22 @@ export const useSessionHistoryStore = defineStore("sessionHistory", {
     async refreshSessions() {
       this.offset = 0;
       await this.loadSessions();
+    },
+    async deleteSession(sessionId: string) {
+      try {
+        await api.deleteSession(sessionId);
+        const idx = this.sessions.findIndex((s) => s.id === sessionId);
+        if (idx !== -1) {
+          this.sessions.splice(idx, 1);
+          this.offset = Math.max(0, this.offset - 1);
+        }
+        // If the deleted session is the active one, clear the session store.
+        const sessionStore = useSessionStore();
+        sessionStore.handleSessionDeleted(sessionId);
+      } catch (e) {
+        this.error = e instanceof Error ? e.message : "删除会话失败。";
+        throw e;
+      }
     },
     togglePanel() {
       this.isPanelOpen = !this.isPanelOpen;

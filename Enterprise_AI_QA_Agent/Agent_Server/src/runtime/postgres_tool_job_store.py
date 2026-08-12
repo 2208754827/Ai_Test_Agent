@@ -289,6 +289,16 @@ class PostgresToolJobStore:
                 rows = cur.fetchall() or []
         return [_artifact_from_row(row) for row in rows]
 
+    def _get_artifact_sync(self, artifact_id: str) -> ToolArtifactRecord | None:
+        with postgres_connect(self._settings) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT * FROM {self._settings.postgres_tool_artifact_table} WHERE id = %s",
+                    (artifact_id,),
+                )
+                row = cur.fetchone()
+        return _artifact_from_row(row) if row else None
+
     def _list_artifacts_for_sessions_sync(
         self,
         session_ids: list[str],
@@ -367,7 +377,10 @@ def _artifact_from_row(row: dict) -> ToolArtifactRecord:
     metadata = dict(row.get("metadata") or {})
     storage_mode = row.get("storage_mode")
     if storage_mode:
-        metadata["storage_mode"] = storage_mode
+        metadata["__storage_mode"] = storage_mode
+    content_text = str(row.get("content_text") or "")
+    if content_text:
+        metadata["__content_text"] = content_text
     return ToolArtifactRecord(
         id=row["id"],
         tool_job_id=row["tool_job_id"],

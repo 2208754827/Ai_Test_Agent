@@ -31,13 +31,17 @@ class ModelRegistry:
     ) -> ModelDescriptor:
         active = {item.key: item for item in self._store.list_active()}
 
+        if requested_key and requested_key in active and (
+            not supported_model_keys or requested_key in supported_model_keys
+        ):
+            return self._to_descriptor(active[requested_key])
+
         try:
-            return self._to_descriptor(self._store.get_default_active())
+            default = self._store.get_default_active()
+            if not supported_model_keys or default.key in supported_model_keys:
+                return self._to_descriptor(default)
         except KeyError:
             pass
-
-        if requested_key and requested_key in active and requested_key in supported_model_keys:
-            return self._to_descriptor(active[requested_key])
 
         for key in supported_model_keys:
             if key in active:

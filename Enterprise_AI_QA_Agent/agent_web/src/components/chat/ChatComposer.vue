@@ -291,6 +291,7 @@ function formatAttachmentSize(value: unknown) {
         <n-dropdown
           trigger="click"
           placement="top-start"
+          :flip="false"
           :options="modeOptions"
           :menu-props="() => ({ class: 'app-dropdown-menu home-mode-menu' })"
           @select="handleModeSelect"

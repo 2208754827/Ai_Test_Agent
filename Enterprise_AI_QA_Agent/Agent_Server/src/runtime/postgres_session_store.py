@@ -73,9 +73,16 @@ class PostgresSessionStore:
             include_assistant,
         )
 
-    async def append_event(self, session_id: str, event: ExecutionEvent) -> None:
+    async def append_event(
+        self,
+        session_id: str,
+        event: ExecutionEvent,
+        *,
+        publish: bool = True,
+    ) -> None:
         await asyncio.to_thread(self._append_event_sync, session_id, event)
-        await self._queues[session_id].put(event)
+        if publish:
+            await self._queues[session_id].put(event)
 
     async def list_events(
         self,

@@ -167,11 +167,44 @@ class SecurityTestingEvaluationPolicy:
         return classifications
 
     def _categorize_failure(self, task: SecurityTask) -> tuple[str, str, bool]:
-        text = f"{task.last_error} {task.result_summary}".lower()
+        analysis = task.failure_analysis if isinstance(task.failure_analysis, dict) else {}
+        analysis_category = str(analysis.get("failure_category") or "").strip().lower()
+        if analysis_category in {
+            "environment_limited",
+            "environment",
+            "network_unreachable",
+            "target_unreachable",
+            "网络不可达",
+        }:
+            return "environment_limited", "low", False
+        text = " ".join(
+            str(value or "")
+            for value in (
+                task.last_error,
+                task.result_summary,
+                task.raw_output,
+                analysis.get("root_cause"),
+                analysis.get("notes"),
+            )
+        ).lower()
         if "approval" in text or "denied" in text:
             return "approval_or_policy", "high", False
         if "timeout" in text or "timed out" in text:
             return "timeout", "medium", True
+        if any(
+            token in text
+            for token in (
+                "network is unreachable",
+                "connection refused",
+                "could not connect",
+                "failed to connect",
+                "no route to host",
+                "name or service not known",
+                "target_response_not_observed",
+                "网络不可达",
+            )
+        ):
+            return "environment_limited", "low", False
         if "not installed" in text or "not on path" in text or "docker" in text:
             return "environment", "medium", True
         if "parser" in text or "parse" in text:

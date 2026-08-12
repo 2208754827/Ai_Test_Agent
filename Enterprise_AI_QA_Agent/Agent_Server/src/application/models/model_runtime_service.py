@@ -49,6 +49,12 @@ class ModelRuntimeService:
         except KeyError:
             return None
 
+    def get_model_config(self, model_key: str) -> ModelConfigRecord | None:
+        try:
+            return self._model_registry.get_runtime_config(model_key)
+        except KeyError:
+            return None
+
     async def invoke(
         self,
         model_key: str,

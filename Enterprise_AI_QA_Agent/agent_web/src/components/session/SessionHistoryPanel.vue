@@ -69,6 +69,14 @@ async function handleResume(sessionId: string) {
   historyStore.refreshSessions();
 }
 
+async function handleDelete(sessionId: string) {
+  try {
+    await historyStore.deleteSession(sessionId);
+  } catch {
+    // Error is already set in historyStore.error by the action
+  }
+}
+
 async function handleNewChat() {
   if (sessionStore.isSwitching) return;
   await sessionStore.createAndSwitchToNewSession();
@@ -94,6 +102,7 @@ async function handleNewChat() {
           :is-active="sessionStore.session?.id === s.id"
           @click="handleSessionClick(s.id)"
           @resume="handleResume(s.id)"
+          @delete="handleDelete(s.id)"
         />
         <div v-if="historyStore.isLoading" class="session-history-loading">
           <i class="fa-solid fa-spinner fa-spin"></i>

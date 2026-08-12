@@ -11,6 +11,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   click: [];
   resume: [];
+  delete: [];
 }>();
 
 const truncatedTitle = computed(() => {
@@ -46,6 +47,22 @@ const relativeTime = computed(() => {
 const isResumable = computed(
   () => props.session.status === "interrupted" || props.session.status === "failed",
 );
+
+const canResume = computed(() => {
+  // SessionSummary doesn't carry is_resumable; use status as best-effort.
+  // The store's resumeCurrentSession() will check the authoritative flag
+  // from SessionDetail and show an error if the session is not actually resumable.
+  return isResumable.value;
+});
+
+const isDeletable = computed(
+  () => props.session.status !== "running" && props.session.status !== "waiting_approval",
+);
+
+function handleDelete() {
+  if (!window.confirm(t("sessionHistory.delete_confirm"))) return;
+  emit("delete");
+}
 </script>
 
 <template>
@@ -66,6 +83,14 @@ const isResumable = computed(
     >
       <i class="fa-solid fa-play"></i>
       {{ t("sessionHistory.resume") }}
+    </button>
+    <button
+      v-if="isDeletable"
+      class="session-delete-btn"
+      :title="t('sessionHistory.delete')"
+      @click.stop="handleDelete"
+    >
+      <i class="fa-solid fa-trash-can"></i>
     </button>
   </div>
 </template>

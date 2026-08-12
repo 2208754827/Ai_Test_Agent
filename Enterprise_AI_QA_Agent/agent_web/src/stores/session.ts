@@ -1081,8 +1081,33 @@ export const useSessionStore = defineStore("session", {
         this.error = error instanceof Error ? error.message : "中断会话失败。";
       }
     },
+    handleSessionDeleted(sessionId: string) {
+      if (this.session?.id !== sessionId) return;
+      // Disconnect SSE and clear all transient state for the deleted session.
+      this.disconnectEvents();
+      this.stopWatcher();
+      this.session = null;
+      this.activity = [];
+      this.messages = [];
+      this.replayTimeline = [];
+      this.replayMeta = null;
+      this.verificationMeta = null;
+      this.toolJobs = [];
+      this.sessionArtifacts = [];
+      this.selectedToolJob = null;
+      this.error = "";
+      // Clear persisted session ID so a new session is created on next init.
+      const savedSessionId = window.localStorage.getItem(SESSION_ID_STORAGE_KEY);
+      if (savedSessionId === sessionId) {
+        window.localStorage.removeItem(SESSION_ID_STORAGE_KEY);
+      }
+    },
     async resumeCurrentSession() {
-      if (!this.session || !this.session.is_resumable) {
+      if (!this.session) {
+        return;
+      }
+      if (!this.session.is_resumable) {
+        this.error = "此会话无可恢复的快照，无法恢复。请创建新会话重试。";
         return;
       }
       this.error = "";

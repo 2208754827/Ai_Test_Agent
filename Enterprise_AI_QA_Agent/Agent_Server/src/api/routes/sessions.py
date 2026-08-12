@@ -117,6 +117,16 @@ async def update_session(session_id: str, payload: UpdateSessionRequest, request
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@router.delete("/{session_id}")
+async def delete_session(session_id: str, request: Request):
+    try:
+        return await request.app.state.session_service.delete_session(session_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="Session not found") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 @router.get("/{session_id}/events/history")
 async def list_events(
     session_id: str,

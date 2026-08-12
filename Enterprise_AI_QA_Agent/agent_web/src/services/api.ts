@@ -453,6 +453,9 @@ export const api = {
       body: JSON.stringify(payload),
     });
   },
+  deleteSession(sessionId: string): Promise<{ deleted: boolean; session_id: string }> {
+    return request(`/api/v1/sessions/${sessionId}`, { method: "DELETE" });
+  },
   listApprovals(sessionId: string): Promise<ToolApprovalRequest[]> {
     return request(`/api/v1/sessions/${sessionId}/approvals`);
   },

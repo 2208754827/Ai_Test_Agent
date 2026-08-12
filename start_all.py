@@ -374,9 +374,17 @@ def kill_port(port):
 def start_service(key):
     svc = SERVICES[key]
     port = PORTS[key]
-    if port_open(port):
-        warn(f"{svc['label']} 端口 {port} 已被占用,跳过(可能已在运行)")
-        return None
+
+    # 启动前先 kill 占用端口的旧进程,确保运行最新代码
+    old_pid = find_pid_on_port(port)
+    if old_pid:
+        kill_pid(old_pid)
+        info(f"{svc['label']} 端口 {port} 已有旧进程(pid={old_pid}),已 kill")
+        # 等端口释放
+        for _ in range(10):
+            if not port_open(port):
+                break
+            time.sleep(0.5)
 
     log_path = LOG_DIR / svc["log"]
     info(f"启动 {svc['label']} -> {' '.join(svc['cmd'])}")

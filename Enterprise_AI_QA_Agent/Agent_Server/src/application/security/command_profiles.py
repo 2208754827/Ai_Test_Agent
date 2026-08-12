@@ -364,6 +364,74 @@ class SecurityCommandProfileRegistry:
             notes="高风险操作，需要明确授权",
         ))
 
+        # ── Traffic Analysis / Exploit Workbench (approval gated) ─────
+
+        self.register(SecurityCommandProfile(
+            profile_key="tcpdump_timed_capture",
+            tool_name="tcpdump",
+            command_template=(
+                "timeout {duration_seconds} tcpdump -i any -nn -c {packet_count} host {target}"
+            ),
+            description="限时只读流量采样（需审批）",
+            tool_family="traffic_analysis",
+            surface_types=["network", "host", "service"],
+            allowed_arguments=["target", "duration_seconds", "packet_count"],
+            timeout_seconds=45,
+            risk_level="medium",
+            requires_approval=True,
+            parser_key="tcpdump",
+            artifact_policy="always",
+            notes="只读限时抓包，不修改目标；需要明确授权。",
+        ))
+
+        self.register(SecurityCommandProfile(
+            profile_key="searchsploit_exploit_lookup",
+            tool_name="searchsploit",
+            command_template="searchsploit {query} --json",
+            description="ExploitDB 只读利用情报检索（需审批）",
+            tool_family="exploit",
+            surface_types=["host", "service", "web"],
+            allowed_arguments=["query"],
+            timeout_seconds=30,
+            risk_level="low",
+            requires_approval=True,
+            parser_key="searchsploit",
+            artifact_policy="on_finding",
+            notes="仅检索公开利用信息，不运行 PoC；仍需明确授权。",
+        ))
+
+        self.register(SecurityCommandProfile(
+            profile_key="msf_module_info",
+            tool_name="msfconsole",
+            command_template="msfconsole -q -x 'info {module_name}; exit'",
+            description="Metasploit 模块元数据只读查询（需审批）",
+            tool_family="exploit",
+            surface_types=["host", "service", "web"],
+            allowed_arguments=["module_name"],
+            timeout_seconds=90,
+            risk_level="medium",
+            requires_approval=True,
+            parser_key="",
+            artifact_policy="always",
+            notes="只允许 info 子命令，不设置目标或执行 exploit。",
+        ))
+
+        self.register(SecurityCommandProfile(
+            profile_key="free_command",
+            tool_name="controlled-command",
+            command_template="{command}",
+            description="受控自由安全命令（配置开启且需审批）",
+            tool_family="general_scan",
+            surface_types=["network", "host", "service", "web", "api"],
+            allowed_arguments=["command", "target"],
+            timeout_seconds=300,
+            risk_level="high",
+            requires_approval=True,
+            parser_key="",
+            artifact_policy="always",
+            notes="仅在 security_runner_allow_free_command 开启后可用。",
+        ))
+
 
 # Module-level singleton
 _registry: SecurityCommandProfileRegistry | None = None

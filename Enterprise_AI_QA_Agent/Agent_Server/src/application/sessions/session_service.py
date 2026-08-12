@@ -199,6 +199,28 @@ class SessionService:
         refreshed = await self._require_session(session_id)
         return await self._to_detail(refreshed)
 
+    async def delete_session(self, session_id: str) -> dict:
+        """Delete a session and all associated data (events, snapshots, approvals, messages).
+
+        Raises KeyError if the session does not exist.
+        Raises ValueError if the session is currently running or waiting for approval.
+        """
+        session = await self._require_session(session_id)
+        if session.status in (SessionStatus.running, SessionStatus.waiting_approval):
+            raise ValueError(
+                f"Cannot delete session in '{session.status.value}' state. "
+                "Interrupt the session first."
+            )
+        # Close the SSE event queue so any connected client disconnects cleanly.
+        queue = self._store.get_queue(session_id)
+        if queue is not None:
+            try:
+                queue.put_nowait(None)  # type: ignore[arg-type]
+            except Exception:
+                pass
+        deleted = await self._store.delete_session(session_id)
+        return {"deleted": deleted, "session_id": session_id}
+
     async def list_events(
         self,
         session_id: str,
@@ -816,6 +838,77 @@ class SessionService:
                 "interrupted",
                 "resumable",
             }
+            # Emergency snapshot: if the graph crashed before a snapshot could be
+            # saved (e.g. NameError in a graph node), build one from the
+            # execution_request so the session is at least partially resumable.
+            if not is_resumable:
+                try:
+                    emergency_snapshot = SessionSnapshot(
+                        id=str(uuid4()),
+                        session_id=session_id,
+                        version=session.snapshot_count + 1,
+                        stage="interrupted",
+                        created_at=datetime.utcnow(),
+                        graph_state={
+                            "turn_id": execution_request.turn_id,
+                            "user_message": payload.content,
+                            "normalized_input": getattr(execution_request, "normalized_input", payload.content),
+                            "session_mode": session.session_mode.value,
+                            "runtime_mode": session.runtime_mode.value,
+                            "mode_key": execution_request.mode_key if hasattr(execution_request, "mode_key") else session.mode_key,
+                            "selected_agent_key": payload.agent_key or session.selected_agent or "",
+                            "selected_agent_name": "",
+                            "selected_model_key": payload.model_key or session.preferred_model or "",
+                            "selected_model_name": "",
+                            "selected_model_provider": "",
+                            "requested_skill_keys": list(execution_request.skill_keys) if hasattr(execution_request, "skill_keys") else [],
+                            "resolved_skill_keys": [],
+                            "skill_prompt_blocks": [],
+                            "memory_hits": [],
+                            "memory_prompt_blocks": [],
+                            "observation_hits": [],
+                            "observation_prompt_blocks": [],
+                            "active_mcp_servers": [],
+                            "mcp_prompt_blocks": [],
+                            "available_tool_keys": [],
+                            "deferred_tool_keys": [],
+                            "model_visible_tool_keys": [],
+                            "allowed_tool_keys": [],
+                            "approval_required_tool_keys": [],
+                            "denied_tool_keys": [],
+                            "permission_decisions": [],
+                            "pending_approvals": [],
+                            "plan_steps": [],
+                            "system_prompt_sections": [],
+                            "runtime_message_sections": [],
+                            "system_prompt": "",
+                            "runtime_messages": [],
+                            "model_request_payload": {},
+                            "model_response_summary": {},
+                            "model_response_text": "",
+                            "assistant_tool_call_message": {},
+                            "model_tool_calls": [],
+                            "tool_results": [],
+                            "tool_messages": [],
+                            "worker_dispatches": [],
+                            "context_bundle": dict(execution_request.context) if hasattr(execution_request, "context") else {},
+                            "event_log": [],
+                            "pending_turn": {},
+                            "control_state": "interrupted",
+                            "loop_iteration": 0,
+                            "max_iterations": 10,
+                            "continue_loop": False,
+                            "skip_routing": False,
+                            "termination_reason": "interrupted",
+                            "final_response": "",
+                        },
+                    )
+                    await self._store.save_snapshot(session_id, emergency_snapshot)
+                    session.snapshot_count += 1
+                    is_resumable = True
+                except Exception:
+                    # If emergency snapshot also fails, keep is_resumable=False
+                    pass
             session.status = SessionStatus.interrupted
             self._ensure_control_metadata(session).update(
                 {
@@ -1093,11 +1186,16 @@ class SessionService:
         session_id = session.id
         model_response_summary = runtime_result.state.get("model_response_summary", {})
         response_mode = str(model_response_summary.get("mode") or "ok")
-        # Skip events that were already streamed in real-time during graph execution
+        # Graph events may already have been sent to SSE, but they still need to
+        # be persisted for audit/replay. Avoid a second queue publish for the
+        # streamed prefix instead of dropping those events from storage.
         streamed_count = runtime_result.state.get("_streamed_event_count", 0)
-        events_to_append = runtime_result.events[streamed_count:] if streamed_count > 0 else runtime_result.events
-        for event in events_to_append:
-            await self._store.append_event(session_id, event)
+        for index, event in enumerate(runtime_result.events):
+            await self._store.append_event(
+                session_id,
+                event,
+                publish=index >= streamed_count,
+            )
 
         for tool_message in runtime_result.tool_messages:
             session.messages.append(tool_message)

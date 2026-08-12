@@ -1,13 +1,26 @@
 """PentAGI-style subtask refinement for Security Testing Mode."""
 from __future__ import annotations
 
+import hashlib
+from typing import Any
+
 from src.modes.security_testing_mode.campaign_state import (
     SecurityCampaign,
     SecuritySubtask,
+    SecurityTask,
     SecurityTestingRequestState,
 )
-from src.modes.security_testing_mode.contracts import TASK_FAILED
+from src.modes.security_testing_mode.contracts import (
+    MAX_CAMPAIGN_TASKS,
+    TASK_COMPLETED,
+    TASK_FAILED,
+    TASK_PENDING,
+    TASK_READY,
+    TASK_BLOCKED,
+)
+from src.modes.security_testing_mode.agent import resolve_security_worker_agent
 from src.modes.security_testing_mode.subtask_generator import SecuritySubtaskGenerator
+from src.modes.security_testing_mode.task_pool import SecurityTaskPool
 
 
 class SecuritySubtaskRefiner:
@@ -62,6 +75,110 @@ class SecuritySubtaskRefiner:
 
             refined.append(subtask)
         return refined, notes
+
+    def refine_task_pool(
+        self,
+        *,
+        pool: SecurityTaskPool,
+        settled_tasks: list[SecurityTask],
+        refinement_id: str,
+        max_tasks: int = MAX_CAMPAIGN_TASKS,
+    ) -> dict[str, Any]:
+        """Apply deterministic, evidence-backed changes between execution batches."""
+        removed = self._remove_duplicate_future_tasks(pool)
+        added: list[SecurityTask] = []
+        for task in settled_tasks:
+            if task.status != TASK_COMPLETED:
+                continue
+            for candidate in self._tasks_from_open_ports(task, refinement_id):
+                if pool.task_count >= max(1, int(max_tasks)):
+                    break
+                if self._has_equivalent_task(pool, candidate):
+                    continue
+                if pool.add_task(candidate):
+                    added.append(candidate)
+        return {
+            "refinement_id": refinement_id,
+            "added_tasks": added,
+            "removed_tasks": removed,
+            "task_count": pool.task_count,
+        }
+
+    def _tasks_from_open_ports(self, task: SecurityTask, refinement_id: str) -> list[SecurityTask]:
+        parsed = task.parsed_result if isinstance(task.parsed_result, dict) else {}
+        open_ports = parsed.get("open_ports")
+        if not isinstance(open_ports, list):
+            return []
+        tasks: list[SecurityTask] = []
+        for item in open_ports:
+            if not isinstance(item, dict) or str(item.get("state") or "open") != "open":
+                continue
+            try:
+                port = int(item.get("port") or 0)
+            except (TypeError, ValueError):
+                continue
+            if port <= 0 or port > 65535:
+                continue
+            host = str(item.get("host") or task.target or "").strip()
+            if not host:
+                continue
+            service = str(item.get("service") or "unknown").strip()
+            stable = hashlib.sha1(f"{host}:{port}:nmap_service_detect".encode("utf-8")).hexdigest()[:10]
+            tasks.append(
+                SecurityTask(
+                    task_id=f"refine_{stable}",
+                    name=f"Refined service detection for {host}:{port}",
+                    description=(
+                        f"Open port {port}/tcp ({service}) was discovered by {task.task_id}; "
+                        "run version detection before any vulnerability-specific work."
+                    ),
+                    surface_type="service",
+                    tool_family="network_recon",
+                    command_profile="nmap_service_detect",
+                    target=host,
+                    target_port=port,
+                    depends_on=[task.task_id],
+                    risk_level="low",
+                    requires_approval=False,
+                    resource_locks=[f"{host}:{port}"],
+                    timeout_seconds=180,
+                    max_retries=1,
+                    refine_origin=refinement_id,
+                    worker_agent_key=resolve_security_worker_agent(
+                        surface_type="service",
+                        tool_family="network_recon",
+                        command_profile="nmap_service_detect",
+                    ),
+                )
+            )
+        return tasks
+
+    def _remove_duplicate_future_tasks(self, pool: SecurityTaskPool) -> list[SecurityTask]:
+        seen: set[tuple[str, str, int | None]] = set()
+        removed: list[SecurityTask] = []
+        future_states = {TASK_PENDING, TASK_READY, TASK_BLOCKED}
+        for task in pool.all_tasks:
+            signature = (task.command_profile, task.target, task.target_port)
+            if signature not in seen:
+                seen.add(signature)
+                continue
+            if task.status not in future_states:
+                continue
+            duplicate = pool.remove_task(
+                task.task_id,
+                reason=f"Refiner removed duplicate of {signature[0]} for {signature[1]}.",
+            )
+            if duplicate is not None:
+                removed.append(duplicate)
+        return removed
+
+    def _has_equivalent_task(self, pool: SecurityTaskPool, candidate: SecurityTask) -> bool:
+        return any(
+            task.command_profile == candidate.command_profile
+            and task.target == candidate.target
+            and task.target_port == candidate.target_port
+            for task in pool.all_tasks
+        )
 
     def _classify_failure(self, message: str) -> str:
         normalized = message.lower()

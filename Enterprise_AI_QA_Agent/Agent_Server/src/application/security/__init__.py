@@ -6,9 +6,12 @@ from src.application.security.execution_environment_service import (
     SecurityExecutionEnvironmentService,
 )
 from src.application.security.execution_monitor import SecurityExecutionMonitor
+from src.application.security.target_guard import SecurityTargetGuard, TargetGuardResult
 
 __all__ = [
     "SecurityCommandExecutionResult",
     "SecurityExecutionEnvironmentService",
     "SecurityExecutionMonitor",
+    "SecurityTargetGuard",
+    "TargetGuardResult",
 ]

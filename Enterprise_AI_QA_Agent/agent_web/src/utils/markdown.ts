@@ -61,9 +61,10 @@ md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
   }
   // Artifact download links: add download attribute so the browser downloads
   // the file instead of navigating to it, and add a visual indicator class.
-  if (/^\/api\/v1\/sessions\/[^/]+\/artifacts\//i.test(href)) {
+  // Use precise regex matching the full /content endpoint to avoid false matches.
+  if (/^\/api\/v1\/sessions\/[^/]+\/artifacts\/[^/]+\/content$/i.test(href)) {
     token.attrSet("download", "");
-    token.attrSet("class", "artifact-download-link");
+    token.attrJoin("class", "artifact-download-link");
   }
   return defaultLinkRender(tokens, idx, options, env, self);
 };
@@ -77,9 +78,12 @@ md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
  * which linkify ignores. This plugin detects such bare paths in text tokens
  * and wraps them in markdown link tokens so they render as clickable links
  * (and get the `artifact-download-link` class from the link_open rule above).
+ *
+ * Operating at the token level is more robust than string-level replacement
+ * because it will not match URLs inside code blocks or other protected contexts.
  */
 function artifactAutoLink(md: MarkdownIt): void {
-  const ARTIFACT_RE = /(^|[\s(：:])(\/api\/v1\/sessions\/[a-f0-9-]+\/artifacts\/[a-f0-9-]+\/content)(?=[\s).,;:!\?？。”》、]|$)/gi;
+  const ARTIFACT_RE = /(^|[\s(：:])(\/api\/v1\/sessions\/[a-f0-9-]+\/artifacts\/[a-f0-9-]+\/content)(?=[\s).,;:!\?？。"》、]|$)/gi;
 
   md.core.ruler.push("artifact_auto_link", (state) => {
     // Obtain the Token constructor from an existing token (markdown-it does
@@ -123,7 +127,7 @@ function artifactAutoLink(md: MarkdownIt): void {
           const linkOpen = new TokenCtor("link_open", "a", 1);
           linkOpen.attrSet("href", url);
           linkOpen.attrSet("download", "");
-          linkOpen.attrSet("class", "artifact-download-link");
+          linkOpen.attrJoin("class", "artifact-download-link");
           newChildren.push(linkOpen);
 
           // Create text token with the URL as visible label

@@ -1151,9 +1151,7 @@ async function doCleanupConfirm() {
   padding: 0 12px 12px;
 }
 
-/* Segmented control (replaces slider for the 5 discrete font tiers).
-   Click-based, so it stays accurate under the global `zoom` used for font scaling
-   — unlike a slider, which relies on pointer-x / track-width math that zoom distorts. */
+/* Segmented control for the 5 discrete font tiers. */
 .segmented-control {
   display: flex;
   margin-top: 14px;
@@ -1226,7 +1224,7 @@ async function doCleanupConfirm() {
 }
 
 .preview-text {
-  /* Whole-UI zoom already scales this text; keep base size fixed to avoid double-scaling. */
+  /* Whole-UI scaling is handled by Electron page zoom on desktop. */
   font-size: 16px;
   color: var(--general-text-primary);
   line-height: 1.5;

@@ -80,6 +80,9 @@ class SecurityTestingVerificationPolicy:
             self._check_tasks_executed(campaign.tasks),
             self._check_execution_records(campaign),
             self._check_evidence_for_findings(campaign),
+            self._check_security_bug_quality(campaign),
+            self._check_exploit_workspace_quality(campaign),
+            self._check_tool_bootstrap_quality(campaign),
             self._check_high_risk_findings_have_recommendations(campaign),
             self._check_failed_tasks_have_errors(campaign.tasks),
         ]
@@ -205,6 +208,78 @@ class SecurityTestingVerificationPolicy:
             affected_findings=[str(item) for item in missing],
         )
 
+    def _check_security_bug_quality(
+        self,
+        campaign: SecurityCampaign,
+    ) -> SecurityVerificationRule:
+        eligible_finding_ids = {
+            finding_id
+            for attempt in campaign.verification_attempts
+            if attempt.status == "succeeded" and attempt.evidence_ids
+            for finding_id in attempt.finding_ids
+        }
+        if not eligible_finding_ids:
+            return SecurityVerificationRule(
+                rule_id="security_bug_quality",
+                name="Reproducible Security Bug Quality",
+                passed=True,
+                severity="info",
+                description=(
+                    "No succeeded evidence-backed verification attempts were available for Bug promotion."
+                ),
+            )
+        covered_finding_ids = {
+            finding_id
+            for bug in campaign.security_bugs
+            for finding_id in bug.finding_ids
+        }
+        missing = sorted(eligible_finding_ids - covered_finding_ids)
+        invalid: list[str] = []
+        for bug in campaign.security_bugs:
+            required_values = (
+                bug.bug_id,
+                bug.fingerprint,
+                bug.affected_target,
+                bug.affected_component,
+                bug.preconditions,
+                bug.reproduction_steps,
+                bug.reproduction_request,
+                bug.expected_result,
+                bug.actual_result,
+                bug.evidence_refs,
+                bug.cvss_vector,
+                bug.cvss_rationale,
+                bug.cwe_ids,
+                bug.owasp_categories,
+                bug.regression_case_id,
+                bug.retest_history,
+            )
+            if not all(required_values):
+                invalid.append(bug.bug_id or bug.fingerprint or "unknown")
+        passed = not missing and not invalid
+        return SecurityVerificationRule(
+            rule_id="security_bug_quality",
+            name="Reproducible Security Bug Quality",
+            passed=passed,
+            severity="error",
+            expected=(
+                "every succeeded verified Finding has one complete, traceable, reproducible Bug record"
+            ),
+            actual=(
+                f"{len(eligible_finding_ids) - len(missing)}/{len(eligible_finding_ids)} "
+                f"finding(s) covered; {len(invalid)} invalid Bug record(s)"
+            ),
+            description=(
+                "All promoted Security Bugs satisfy reproduction, mapping, CVSS, evidence and retest-history gates."
+                if passed
+                else (
+                    f"Missing Bug coverage for {len(missing)} finding(s); "
+                    f"{len(invalid)} Bug record(s) have incomplete required fields."
+                )
+            ),
+            affected_findings=missing,
+        )
+
     def _check_failed_tasks_have_errors(self, tasks: list[SecurityTask]) -> SecurityVerificationRule:
         failed = [task for task in tasks if task.status == TASK_FAILED]
         missing = [task.task_id for task in failed if not task.last_error and not task.result_summary]
@@ -221,6 +296,91 @@ class SecurityTestingVerificationPolicy:
                 else f"{len(missing)} failed task(s) lack error detail."
             ),
             affected_tasks=missing,
+        )
+
+    def _check_exploit_workspace_quality(
+        self,
+        campaign: SecurityCampaign,
+    ) -> SecurityVerificationRule:
+        if not campaign.exploit_workspaces:
+            return SecurityVerificationRule(
+                rule_id="exploit_workspace_quality",
+                name="Exploit Workspace Quality",
+                passed=True,
+                severity="info",
+                description="No P2 Exploit Coder workspace was requested or executed.",
+            )
+        invalid: list[str] = []
+        for workspace in campaign.exploit_workspaces:
+            if workspace.status == "completed":
+                required = (
+                    workspace.hypothesis_id,
+                    workspace.target,
+                    workspace.source_hash,
+                    workspace.artifact_hash,
+                    workspace.static_check_status == "passed",
+                    workspace.compile_command,
+                    workspace.compile_exit_code == 0,
+                    workspace.execute_command,
+                    workspace.execute_exit_code == 0,
+                    workspace.impact_verdict,
+                    workspace.cleanup_complete,
+                )
+            else:
+                required = (
+                    workspace.hypothesis_id,
+                    workspace.failure_category,
+                    workspace.failure_reason,
+                    workspace.cleanup_complete,
+                )
+            if not all(required):
+                invalid.append(workspace.workspace_id or workspace.hypothesis_id or "unknown")
+        return SecurityVerificationRule(
+            rule_id="exploit_workspace_quality",
+            name="Exploit Workspace Quality",
+            passed=not invalid,
+            severity="error",
+            expected="every P2 workspace has hashes or a classified failure and proves cleanup",
+            actual=f"{len(campaign.exploit_workspaces) - len(invalid)}/{len(campaign.exploit_workspaces)} valid",
+            description=(
+                "P2 workspaces preserve source/build/execution evidence and cleanup proof."
+                if not invalid
+                else f"Invalid P2 workspace record(s): {', '.join(invalid)}."
+            ),
+        )
+
+    def _check_tool_bootstrap_quality(
+        self,
+        campaign: SecurityCampaign,
+    ) -> SecurityVerificationRule:
+        records = list(campaign.tool_bootstraps or [])
+        if not records:
+            return SecurityVerificationRule(
+                rule_id="tool_bootstrap_quality",
+                name="P4 Tool Bootstrap Auditability",
+                passed=True,
+                severity="info",
+                description="No P4 temporary-tool bootstrap was requested.",
+            )
+        invalid: list[str] = []
+        for record in records:
+            terminal = record.status in {"already_available", "completed", "failed"}
+            has_manifest = bool(str(record.manifest_path or "").strip())
+            if not terminal or not has_manifest or not record.cleanup_complete:
+                invalid.append(record.bootstrap_id or record.tool_name or "unknown")
+        return SecurityVerificationRule(
+            rule_id="tool_bootstrap_quality",
+            name="P4 Tool Bootstrap Auditability",
+            passed=not invalid,
+            severity="error",
+            expected="terminal manifest-backed P4 record with completed cleanup",
+            actual=f"{len(records) - len(invalid)}/{len(records)} compliant",
+            description=(
+                "Every P4 record is terminal, points to a manifest, and confirms temporary container cleanup."
+                if not invalid
+                else f"P4 records missing terminal audit/cleanup guarantees: {', '.join(invalid)}."
+            ),
+            affected_tasks=invalid,
         )
 
     def _build_summary(

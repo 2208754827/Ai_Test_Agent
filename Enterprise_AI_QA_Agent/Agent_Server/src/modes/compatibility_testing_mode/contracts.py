@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from typing import Any, Literal
 from uuid import uuid4
 
@@ -39,7 +39,7 @@ CaseRiskLevel = Literal["low", "medium", "high"]
 
 
 def utc_now() -> str:
-    return datetime.now(UTC).replace(tzinfo=None).isoformat(timespec="seconds") + "Z"
+    return datetime.now(timezone.utc).replace(tzinfo=None).isoformat(timespec="seconds") + "Z"
 
 
 def new_id(prefix: str) -> str:

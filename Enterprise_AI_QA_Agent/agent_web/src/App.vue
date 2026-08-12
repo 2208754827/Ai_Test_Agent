@@ -22,6 +22,13 @@ const VerificationPanel = defineAsyncComponent(() => import("./components/chat/V
 const lightThemeOverrides: GlobalThemeOverrides = {
   common: {
     fontFamily: "var(--app-font-family)",
+    fontSize: "var(--app-font-size)",
+    fontSizeMini: "var(--app-font-size-mini)",
+    fontSizeTiny: "var(--app-font-size-tiny)",
+    fontSizeSmall: "var(--app-font-size-small)",
+    fontSizeMedium: "var(--app-font-size-medium)",
+    fontSizeLarge: "var(--app-font-size-large)",
+    fontSizeHuge: "var(--app-font-size-huge)",
     primaryColor: "#111827",
     primaryColorHover: "#000000",
     primaryColorPressed: "#000000",
@@ -41,6 +48,16 @@ const lightThemeOverrides: GlobalThemeOverrides = {
     actionPositiveTextColorFocus: "#ffffff",
     iconColorWarning: "#111827",
   },
+  Dropdown: {
+    color: "#ffffff",
+    optionTextColor: "#6B7280",
+    optionTextColorHover: "#111827",
+    optionTextColorActive: "#111827",
+    optionTextColorChildActive: "#111827",
+    optionColorHover: "#F9FAFB",
+    optionColorActive: "#F3F4F6",
+    dividerColor: "#E5E7EB",
+  },
 };
 
 const route = useRoute();
@@ -53,6 +70,13 @@ const activeThemeOverrides = computed<GlobalThemeOverrides>(() => {
     return {
       common: {
         fontFamily: "var(--app-font-family)",
+        fontSize: "var(--app-font-size)",
+        fontSizeMini: "var(--app-font-size-mini)",
+        fontSizeTiny: "var(--app-font-size-tiny)",
+        fontSizeSmall: "var(--app-font-size-small)",
+        fontSizeMedium: "var(--app-font-size-medium)",
+        fontSizeLarge: "var(--app-font-size-large)",
+        fontSizeHuge: "var(--app-font-size-huge)",
         primaryColor: "#ffffff",
         primaryColorHover: "#e5e5e5",
         primaryColorPressed: "#cccccc",
@@ -74,6 +98,16 @@ const activeThemeOverrides = computed<GlobalThemeOverrides>(() => {
         actionPositiveTextColorPressed: "#000000",
         actionPositiveTextColorFocus: "#000000",
         iconColorWarning: "#ffffff",
+      },
+      Dropdown: {
+        color: "#050505",
+        optionTextColor: "#9a9a9a",
+        optionTextColorHover: "#f5f5f5",
+        optionTextColorActive: "#ffffff",
+        optionTextColorChildActive: "#ffffff",
+        optionColorHover: "#141414",
+        optionColorActive: "#101010",
+        dividerColor: "#1c1c1c",
       },
     };
   }

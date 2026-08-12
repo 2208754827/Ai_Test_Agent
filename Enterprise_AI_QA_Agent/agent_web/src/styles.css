@@ -21,12 +21,18 @@
   --console-bg: rgba(255, 255, 255, 0.96);
   --app-font-family: Inter, "PingFang SC", "Microsoft YaHei", ui-sans-serif, system-ui, sans-serif;
   --app-font-size-scale: 1;
+  --app-font-size: 14px;
+  --app-font-size-mini: 12px;
+  --app-font-size-tiny: 12px;
+  --app-font-size-small: 14px;
+  --app-font-size-medium: 14px;
+  --app-font-size-large: 15px;
+  --app-font-size-huge: 16px;
   /* Keep naive-ui components in sync with the app font family. */
   --n-font-family: var(--app-font-family);
   font-family: var(--app-font-family);
-  /* Global font-size scaling is handled via root `zoom` (settings store).
-     Keep the base size fixed here to avoid double-scaling. */
-  font-size: 14px;
+  /* Desktop whole-UI scaling is handled by Electron page zoom. */
+  font-size: var(--app-font-size);
   /* Motion design tokens — referenced by page/panel transitions and press feedback. */
   --motion-duration-fast: 120ms;
   --motion-duration-normal: 200ms;
@@ -89,6 +95,21 @@ body,
   min-height: 100%;
 }
 
+.artifact-download-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid color-mix(in srgb, var(--primary-color, #18a058) 45%, transparent);
+  border-radius: 8px;
+  text-decoration: none;
+  font-weight: 600;
+}
+
+.artifact-download-link::before {
+  content: "↓";
+}
+
 #app {
   width: 100%;
   min-height: 100%;
@@ -98,24 +119,18 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--app-font-family);
-  font-size: 14px;
+  font-size: var(--app-font-size);
   overflow: hidden;
   transition: background-color 0.25s ease, color 0.25s ease;
 }
 
-/* Naive-ui teleports popups (dropdowns, dialogs, tooltips) to body level.
-   Keep their coordinate space unscaled, then scale menu content to match #app. */
+/* Naive-ui teleports popups (dropdowns, dialogs, tooltips) to body level. */
 .n-config-provider,
 .v-binder-follower-container,
 .n-modal-container,
 .n-notification-container,
 .n-message-container {
   font-family: var(--app-font-family);
-}
-
-.n-dropdown-menu,
-.n-base-select-menu {
-  zoom: var(--app-font-size-scale, 1);
 }
 
 .dropdown-select-button {
@@ -192,15 +207,26 @@ body {
   font-size: 10px;
 }
 
+/* ── Naive UI Dropdown Menu (teleported to body) ── */
+
+.n-dropdown-menu,
+.n-base-select-menu {
+  zoom: var(--app-font-size-scale, 1);
+}
+
 .app-dropdown-menu {
   /* Keep long option lists inside the viewport after Naive UI flips placement. */
   max-height: min(360px, calc(100dvh - 24px)) !important;
   overflow-y: auto !important;
+  overscroll-behavior: contain !important;
   padding: 6px !important;
   border: 1px solid var(--border) !important;
   border-radius: 6px !important;
   background: var(--surface) !important;
   box-shadow: 0 18px 42px rgba(15, 23, 42, 0.12) !important;
+  scroll-behavior: smooth !important;
+  scrollbar-width: thin !important;
+  scrollbar-color: var(--border) transparent !important;
 }
 
 .app-dropdown-menu .n-dropdown-option {
@@ -241,6 +267,24 @@ body {
   font-size: 12px;
 }
 
+/* Webkit scrollbar for dropdown menus */
+.app-dropdown-menu::-webkit-scrollbar {
+  width: 6px;
+}
+
+.app-dropdown-menu::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.app-dropdown-menu::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 3px;
+}
+
+.app-dropdown-menu::-webkit-scrollbar-thumb:hover {
+  background: var(--muted);
+}
+
 button,
 input,
 select,
@@ -267,11 +311,7 @@ textarea {
 }
 
 .prototype-shell {
-  /* The global font-size zoom lives on <body>; it scales painted geometry (incl. vh)
-     of everything inside by the scale factor. Divide by that factor here so the shell
-     paints at exactly one real viewport height (no overflow / no letterboxing) at any
-     zoom level. Falls back to plain 100vh when the variable is unset. */
-  height: calc(100vh / var(--app-font-size-scale, 1));
+  height: 100vh;
   display: flex;
   overflow: hidden;
   background: var(--bg);
@@ -5982,6 +6022,38 @@ textarea {
 
 .session-resume-btn:hover {
   background: var(--surface-strong);
+}
+
+.session-delete-btn {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  font-size: 12px;
+  color: var(--muted);
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--motion-duration-fast) var(--motion-ease-out),
+              color var(--motion-duration-fast) var(--motion-ease-out),
+              background var(--motion-duration-fast) var(--motion-ease-out);
+}
+
+.session-list-item:hover .session-delete-btn {
+  opacity: 1;
+}
+
+.session-delete-btn:hover {
+  color: var(--red);
+  background: rgba(239, 68, 68, 0.1);
 }
 
 /* ── Session Toggle Button (TopBar) ── */

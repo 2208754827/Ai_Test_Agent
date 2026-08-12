@@ -139,10 +139,20 @@ def build_security_worker_prompt(
     *,
     agent_key: str,
     runner_args: dict[str, object],
+    directives: list[str] | None = None,
 ) -> str:
     role_guidance = WORKER_ROLE_GUIDANCE.get(agent_key, WORKER_ROLE_GUIDANCE[SECURITY_RECON_WORKER_KEY])
+    directive_block = ""
+    if directives:
+        joined = "\n".join(f"- {item}" for item in directives if item)
+        if joined:
+            directive_block = (
+                "\n\nPRIORITY DIRECTIVES (scheduler feedback, read first):\n"
+                f"{joined}\n"
+            )
     return (
-        f"{SECURITY_WORKER_EXECUTION_CONTRACT}\n\n"
+        f"{SECURITY_WORKER_EXECUTION_CONTRACT}\n"
+        f"{directive_block}\n"
         "Role-specific guidance:\n"
         f"- Assigned worker: {agent_key}\n"
         f"- Specialization: {role_guidance}\n\n"
@@ -193,6 +203,23 @@ def build_security_failure_analysis_prompt(task: SecurityTask) -> str:
     )
 
 
+def build_security_exploit_coder_prompt(*, hypothesis: dict, target: str) -> str:
+    """Request source only; the server owns validation, execution and cleanup."""
+    return (
+        "You are security-exploit-coder. Return JSON only with keys language, filename, "
+        "source, and rationale. Generate one minimal Python 3 verifier for the authorized "
+        f"target {target}. Evidence-backed hypothesis JSON: "
+        f"{json.dumps(hypothesis, ensure_ascii=False, separators=(',', ':'))}. "
+        "The verifier must be read-only and non-destructive. It may import only json, sys, "
+        "urllib.request, urllib.error, or urllib.parse. It must accept the target URL as "
+        "sys.argv[1], issue at most one HTTP GET without following redirects, and print one "
+        "final JSON object containing status_code, observed, and impact. Do not use files, "
+        "subprocesses, shell commands, sockets, credentials, callbacks, persistence, package "
+        "installation, lateral movement, or any non-localhost URL literal. Do not claim "
+        "exploitability or CIA impact that the read-only response does not prove."
+    )
+
+
 __all__ = [
     "SECURITY_MODE_SYSTEM_CONTRACT",
     "SECURITY_WORKER_EXECUTION_CONTRACT",
@@ -200,4 +227,33 @@ __all__ = [
     "WORKER_ROLE_GUIDANCE",
     "build_security_worker_prompt",
     "build_security_failure_analysis_prompt",
+    "build_security_exploit_coder_prompt",
+    "build_security_scenario_analysis_prompt",
+    "build_security_threat_planning_prompt",
 ]
+def build_security_scenario_analysis_prompt(*, target: str, request: dict, assets: list[dict]) -> str:
+    """Return the strict JSON contract for the pre-planning doc analyst."""
+    request_json = json.dumps(request, ensure_ascii=False, separators=(",", ":"))
+    assets_json = json.dumps(assets, ensure_ascii=False, separators=(",", ":"))
+    return (
+        "Analyze the authorized security-test target before any scanner plan is frozen. "
+        "Separate observed facts, user declarations, model inferences, and unknowns. "
+        "Do not claim that a URL path proves a business capability. Return exactly one JSON object with keys: "
+        "business_capabilities, technologies, entry_points, auth_flows, roles, sensitive_data_types, "
+        "trust_boundaries, external_dependencies, assumptions, unknowns, facts. Each facts item must contain "
+        "statement, source_type (observed/user_declared/model_inference), evidence_ids, confidence. "
+        f"Target: {target}\nRequest JSON: {request_json}\nSeed assets JSON: {assets_json}"
+    )
+
+
+def build_security_threat_planning_prompt(*, scenario: dict) -> str:
+    """Return the strict JSON contract for the pre-execution attack-surface planner."""
+    scenario_json = json.dumps(scenario, ensure_ascii=False, separators=(",", ":"))
+    return (
+        "Build low-risk, testable threat hypotheses for the supplied authorized scenario. "
+        "Do not output commands, payloads, or exploitation steps. Every hypothesis must cite supporting_fact_ids "
+        "or explicitly list assumptions. Return exactly one JSON object with key threat_hypotheses. Each item: "
+        "threat_id, actor, entry_point, trust_boundary, technique, cwe_ids, owasp_categories, attack_references, "
+        "expected_impact, supporting_fact_ids, assumptions, priority, confidence. "
+        f"Scenario JSON: {scenario_json}"
+    )

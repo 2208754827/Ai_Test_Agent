@@ -32,6 +32,15 @@ SECURITY_RUNNER_OUTPUT_SCHEMA = {
     "error": "string",
 }
 
+SECURITY_TOOL_BOOTSTRAP_OUTPUT_SCHEMA = {
+    "status": "string",
+    "ok": "boolean",
+    "summary": "string",
+    "error": "string",
+    "tool_bootstrap": "object",
+    "artifacts": "array",
+}
+
 
 SECURITY_SCAN_RUNNER_OUTPUT_SCHEMA = {
     **SECURITY_RUNNER_OUTPUT_SCHEMA,
@@ -232,6 +241,43 @@ class ToolRegistry:
                     tags=["retrieval", "knowledge"],
                 ),
                 handler_key="knowledge-rag",
+            ),
+            "web_search": ToolModule(
+                descriptor=ToolDescriptor(
+                    key="web_search",
+                    name="Web Search",
+                    description=(
+                        "Search the public web for current information and return structured results with "
+                        "titles, URLs, snippets, and source metadata."
+                    ),
+                    category="retrieval",
+                    permission_level="safe",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string", "description": "The web search query."},
+                            "limit": {
+                                "type": "integer",
+                                "description": "Maximum number of results to return.",
+                                "default": 5,
+                            },
+                            "time_range": {
+                                "type": "string",
+                                "description": "Optional freshness hint such as day, week, month, year, or all.",
+                            },
+                        },
+                        "required": ["query"],
+                    },
+                    output_schema={
+                        "query": "string",
+                        "results": "array",
+                        "answer": "string",
+                        "provider": "string",
+                    },
+                    tags=["core", "web", "search", "current-information"],
+                    capability_keys=["web.search"],
+                ),
+                handler_key="web_search",
             ),
             "api-docs-library": ToolModule(
                 descriptor=ToolDescriptor(
@@ -471,6 +517,26 @@ class ToolRegistry:
                     tags=["planning", "qa"],
                 ),
                 handler_key="test-case-generator",
+            ),
+            "test-case-xlsx-exporter": ToolModule(
+                descriptor=ToolDescriptor(
+                    key="test-case-xlsx-exporter",
+                    name="Test Case XLSX Exporter",
+                    description="Export structured test cases to an xlsx file for download after test-case generation.",
+                    category="qa",
+                    permission_level="safe",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "cases": {"type": "array", "description": "Test case objects to export."},
+                            "feature": {"type": "string", "description": "Feature name used in the filename."},
+                        },
+                        "required": ["cases"],
+                    },
+                    output_schema={"ok": "boolean", "summary": "string", "artifact_path": "string", "case_count": "integer", "artifacts": "array", "error": "string"},
+                    tags=["planning", "qa", "export", "xlsx"],
+                ),
+                handler_key="test-case-xlsx-exporter",
             ),
             "browser-automation": ToolModule(
                 descriptor=ToolDescriptor(
@@ -1249,6 +1315,33 @@ class ToolRegistry:
                 ),
                 handler_key="security-scan-runner",
             ),
+            "security-tool-bootstrap": ToolModule(
+                descriptor=ToolDescriptor(
+                    key="security-tool-bootstrap",
+                    name="Security Tool Bootstrap",
+                    description=(
+                        "P4 专用临时 Kali 工具就绪检查与 allowlist 安装。"
+                        "仅接受服务端固定包计划；必须使用独立审批，不能复用扫描批准。"
+                    ),
+                    category="execution",
+                    permission_level="ask",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "campaign_id": {"type": "string"},
+                            "target_allowlist": {"type": "array", "items": {"type": "string"}},
+                            "profile_key": {"type": "string"},
+                            "tool_name": {"type": "string"},
+                            "requested_version": {"type": "string"},
+                            "timeout_seconds": {"type": "number"},
+                        },
+                        "required": ["campaign_id", "target_allowlist", "profile_key", "tool_name"],
+                    },
+                    output_schema=SECURITY_TOOL_BOOTSTRAP_OUTPUT_SCHEMA,
+                    tags=["security", "bootstrap", "installer", "p4"],
+                ),
+                handler_key="security-tool-bootstrap",
+            ),
             "network-recon-runner": ToolModule(
                 descriptor=ToolDescriptor(
                     key="network-recon-runner",
@@ -1285,7 +1378,7 @@ class ToolRegistry:
                     name="Web Scan Runner",
                     description=(
                         "Web 安全扫描 runner，执行目录扫描、漏洞扫描、注入检测等 Web 层安全测试。"
-                        "支持 httpx_probe、whatweb_fingerprint、ffuf_common_dirs、nikto_web_scan、"
+                        "支持 httpx_probe、whatweb_fingerprint、http_headers_probe、ffuf_common_dirs、nikto_web_scan、"
                         "nuclei_baseline、sqlmap_readonly_probe 等 profile。"
                     ),
                     category="execution",
@@ -1295,7 +1388,7 @@ class ToolRegistry:
                         "properties": {
                             "command_profile": {
                                 "type": "string",
-                                "description": "Profile key: httpx_probe / whatweb_fingerprint / ffuf_common_dirs / nikto_web_scan / nuclei_baseline / nuclei_cve_scan / sqlmap_readonly_probe",
+                                "description": "Profile key: httpx_probe / whatweb_fingerprint / http_headers_probe / ffuf_common_dirs / nikto_web_scan / nuclei_baseline / nuclei_cve_scan / sqlmap_readonly_probe",
                             },
                             "target": {"type": "string", "description": "目标 URL 或域名。"},
                             "arguments": {"type": "object", "description": "额外参数。"},
@@ -1345,7 +1438,7 @@ class ToolRegistry:
                         "支持 hydra_basic_login 等 profile。"
                     ),
                     category="execution",
-                    permission_level="restricted",
+                    permission_level="ask",
                     input_schema={
                         "type": "object",
                         "properties": {
@@ -1373,7 +1466,7 @@ class ToolRegistry:
                     name="Traffic Analysis Runner",
                     description="流量分析 runner，执行网络流量捕获和 TLS 分析（Phase 2）。",
                     category="execution",
-                    permission_level="restricted",
+                    permission_level="ask",
                     input_schema={
                         "type": "object",
                         "properties": {
@@ -1394,7 +1487,7 @@ class ToolRegistry:
                     name="Exploit Workbench Runner",
                     description="漏洞利用工作台 runner，执行 PoC 验证和漏洞利用（高风险，Phase 3/4）。",
                     category="execution",
-                    permission_level="restricted",
+                    permission_level="ask",
                     input_schema={
                         "type": "object",
                         "properties": {
@@ -2128,6 +2221,7 @@ class ToolRegistry:
             "security_testing": {
                 "network-recon-runner", "web-scan-runner", "service-audit-runner",
                 "credential-attack-runner", "traffic-analysis-runner", "exploit-workbench-runner",
+                "security-tool-bootstrap",
             },
             "code_review": {
                 "code-governance-runner", "project-source-loader", "project-tree-scanner",
